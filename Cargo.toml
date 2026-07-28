@@ -1,0 +1,20 @@
+[package]
+name = "opsh"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.85"
+description = "opsh — a small, local-first shell"
+authors = ["AEFireflyLabs"]
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["shell", "terminal", "cli", "rust"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "opsh"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
