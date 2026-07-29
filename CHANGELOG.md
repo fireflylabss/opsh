@@ -2,6 +2,14 @@
 
 All notable changes to opsh are documented here.
 
+## 0.1.5 — 2026-07-29
+
+### Added
+
+- Interactive startup file at `$OPSH_RC` or `~/.config/opsh/rc`.
+- `alias` / `unalias` built-ins, with tab completion and `which` support.
+- GitHub Actions workflow to publish the AUR package on `v*` tags.
+
 ## 0.1.4 — 2026-07-29
 
 ### Added

@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -14,9 +16,9 @@ const MAX_HISTORY: usize = 1_000;
 const MAX_SOURCE_DEPTH: usize = 32;
 
 const BUILTINS: &[&str] = &[
-    ".", "about", "cd", "clear", "dirs", "exit", "get", "help", "history", "mkcd", "mkdir", "open",
-    "path", "popd", "pushd", "pwd", "repeat", "set", "source", "status", "time", "touch", "unset",
-    "which",
+    ".", "about", "alias", "cd", "clear", "dirs", "exit", "get", "help", "history", "mkcd",
+    "mkdir", "open", "path", "popd", "pushd", "pwd", "repeat", "set", "source", "status", "time",
+    "touch", "unalias", "unset", "which",
 ];
 
 const RESET: &str = "\x1b[0m";
@@ -37,6 +39,7 @@ pub struct Shell {
     directory_stack: Vec<PathBuf>,
     last_status: i32,
     source_depth: usize,
+    aliases: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 pub struct History {
@@ -104,6 +107,7 @@ struct OpshHelper {
 
 struct OpshCompleter {
     files: FilenameCompleter,
+    aliases: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 impl Completer for OpshCompleter {
@@ -136,6 +140,21 @@ impl Completer for OpshCompleter {
                     replacement: (*name).to_owned(),
                 })
                 .collect::<Vec<_>>();
+
+            if let Ok(aliases) = self.aliases.lock() {
+                for name in aliases.keys() {
+                    if name.starts_with(prefix)
+                        && !matches
+                            .iter()
+                            .any(|candidate| candidate.replacement == *name)
+                    {
+                        matches.push(Pair {
+                            display: name.clone(),
+                            replacement: name.clone(),
+                        });
+                    }
+                }
+            }
 
             for name in path_executables_matching(prefix) {
                 if matches
@@ -174,15 +193,33 @@ impl Shell {
             directory_stack: Vec::new(),
             last_status: 0,
             source_depth: 0,
+            aliases: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
     pub fn repl(&mut self) -> Result<i32, String> {
         if self.interactive {
+            if let Err(error) = self.load_rc() {
+                eprintln!("{}opsh:{} {error}", self.paint(YELLOW), self.paint(RESET));
+                self.last_status = 1;
+            }
             self.banner();
             return self.interactive_repl();
         }
         self.batch_repl()
+    }
+
+    fn load_rc(&mut self) -> Result<(), String> {
+        let Some(path) = rc_path() else {
+            return Ok(());
+        };
+        if !path.is_file() {
+            return Ok(());
+        }
+        match self.source_file(&path)? {
+            Flow::Continue(_) => Ok(()),
+            Flow::Exit(code) => Err(format!("rc exited with status {code}")),
+        }
     }
 
     fn interactive_repl(&mut self) -> Result<i32, String> {
@@ -190,6 +227,7 @@ impl Shell {
         let helper = OpshHelper {
             completer: OpshCompleter {
                 files: FilenameCompleter::new(),
+                aliases: Arc::clone(&self.aliases),
             },
             hinter: HistoryHinter::new(),
         };
@@ -298,6 +336,32 @@ impl Shell {
     }
 
     fn dispatch_simple(&mut self, command: &str) -> Result<Flow, String> {
+        let expanded = self.expand_alias(command)?;
+        self.dispatch_simple_raw(&expanded)
+    }
+
+    fn expand_alias(&self, command: &str) -> Result<String, String> {
+        let words = split_words(command)?;
+        let Some(name) = words.first().map(String::as_str) else {
+            return Ok(command.to_owned());
+        };
+        if name == "alias" || name == "unalias" {
+            return Ok(command.to_owned());
+        }
+        let aliases = self
+            .aliases
+            .lock()
+            .map_err(|_| "alias table is poisoned".to_owned())?;
+        let Some(expansion) = aliases.get(name) else {
+            return Ok(command.to_owned());
+        };
+        Ok(match command_tail(command, 1) {
+            Some(rest) => format!("{expansion} {rest}"),
+            None => expansion.clone(),
+        })
+    }
+
+    fn dispatch_simple_raw(&mut self, command: &str) -> Result<Flow, String> {
         let words = split_words(command)?;
         let Some(name) = words.first().map(String::as_str) else {
             return Ok(Flow::Continue(0));
@@ -320,6 +384,8 @@ impl Shell {
             "open" => self.open(words.get(1).map(String::as_str)),
             "set" => self.set(&words[1..]),
             "unset" => self.unset(words.get(1).map(String::as_str)),
+            "alias" => self.alias(&words[1..]),
+            "unalias" => self.unalias(&words[1..]),
             "source" | "." => self.source(words.get(1).map(String::as_str)),
             "repeat" => self.repeat(command),
             "time" => self.time(command),
@@ -422,6 +488,18 @@ impl Shell {
 
     fn which(&self, command: Option<&str>) -> Result<Flow, String> {
         let command = command.ok_or("which: expected a command")?;
+        if let Ok(aliases) = self.aliases.lock() {
+            if let Some(expansion) = aliases.get(command) {
+                println!(
+                    "{}{}{} is aliased to `{}`",
+                    self.paint(VIOLET),
+                    command,
+                    self.paint(RESET),
+                    expansion
+                );
+                return Ok(Flow::Continue(0));
+            }
+        }
         if is_builtin(command) {
             println!(
                 "{}{}{} is a shell built-in",
@@ -560,20 +638,87 @@ impl Shell {
         Ok(Flow::Continue(0))
     }
 
+    fn alias(&mut self, words: &[String]) -> Result<Flow, String> {
+        let mut aliases = self
+            .aliases
+            .lock()
+            .map_err(|_| "alias table is poisoned".to_owned())?;
+        if words.is_empty() {
+            for (name, value) in aliases.iter() {
+                println!("alias {name}={}", shell_quote(value));
+            }
+            return Ok(Flow::Continue(0));
+        }
+        if words.len() == 1 {
+            let spec = &words[0];
+            if let Some((name, value)) = spec.split_once('=') {
+                if !is_valid_alias_name(name) {
+                    return Err(format!("alias: invalid name: {name}"));
+                }
+                aliases.insert(name.to_owned(), value.to_owned());
+                return Ok(Flow::Continue(0));
+            }
+            match aliases.get(spec) {
+                Some(value) => {
+                    println!("alias {spec}={}", shell_quote(value));
+                    Ok(Flow::Continue(0))
+                }
+                None => {
+                    eprintln!("alias: {spec}: not found");
+                    Ok(Flow::Continue(1))
+                }
+            }
+        } else {
+            let name = &words[0];
+            if !is_valid_alias_name(name) {
+                return Err(format!("alias: invalid name: {name}"));
+            }
+            aliases.insert(name.clone(), words[1..].join(" "));
+            Ok(Flow::Continue(0))
+        }
+    }
+
+    fn unalias(&mut self, words: &[String]) -> Result<Flow, String> {
+        if words.is_empty() {
+            return Err("unalias: expected a name".into());
+        }
+        let mut aliases = self
+            .aliases
+            .lock()
+            .map_err(|_| "alias table is poisoned".to_owned())?;
+        let mut status = 0;
+        for name in words {
+            if aliases.remove(name).is_none() {
+                eprintln!("unalias: {name}: not found");
+                status = 1;
+            }
+        }
+        Ok(Flow::Continue(status))
+    }
+
     fn source(&mut self, path: Option<&str>) -> Result<Flow, String> {
+        let path = expand_home(path.ok_or("source: expected a file")?)?;
+        self.source_file(&path)
+    }
+
+    fn source_file(&mut self, path: &Path) -> Result<Flow, String> {
         if self.source_depth >= MAX_SOURCE_DEPTH {
             return Err(format!(
                 "source: nested deeper than {MAX_SOURCE_DEPTH} levels"
             ));
         }
-        let path = expand_home(path.ok_or("source: expected a file")?)?;
         let file =
-            File::open(&path).map_err(|error| format!("source: {}: {error}", path.display()))?;
+            File::open(path).map_err(|error| format!("source: {}: {error}", path.display()))?;
         let mut status = 0;
         self.source_depth += 1;
         let result = (|| {
             for line in io::BufReader::new(file).lines() {
-                match self.execute(&line.map_err(|error| error.to_string())?)? {
+                let line = line.map_err(|error| error.to_string())?;
+                let command = line.trim();
+                if command.is_empty() || command.starts_with('#') {
+                    continue;
+                }
+                match self.dispatch(command)? {
                     Flow::Continue(code) => status = code,
                     Flow::Exit(code) => return Ok(Flow::Exit(code)),
                 }
@@ -633,7 +778,7 @@ impl Shell {
 
     fn help(&self) -> Result<Flow, String> {
         println!(
-            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
+            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in, alias or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {alias} [N[=V]]  list or define aliases\n  {unalias} NAME   remove aliases\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}Interactive sessions load ~/.config/opsh/rc (or $OPSH_RC).\n&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
             self.paint(BOLD),
             self.paint(RESET),
             self.paint(DIM),
@@ -656,6 +801,8 @@ impl Shell {
             open = self.command("open"),
             set = self.command("set"),
             unset = self.command("unset"),
+            alias = self.command("alias"),
+            unalias = self.command("unalias"),
             source = self.command("source"),
             repeat = self.command("repeat"),
             time = self.command("time"),
@@ -907,6 +1054,33 @@ fn compact_path(path: &Path) -> Option<String> {
 
 fn is_builtin(command: &str) -> bool {
     BUILTINS.binary_search(&command).is_ok()
+}
+
+fn rc_path() -> Option<PathBuf> {
+    env::var_os("OPSH_RC")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|dir| PathBuf::from(dir).join("opsh/rc")))
+        .or_else(|| env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".config/opsh/rc")))
+}
+
+fn is_valid_alias_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
+        && chars.all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".into();
+    }
+    if value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '/' | '.' | ':' | '=')
+    }) {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Shell used for external / compound command lines.
@@ -1353,6 +1527,46 @@ mod tests {
         let mut shell = Shell::new(history);
         let flow = shell.dispatch("true | true").unwrap();
         assert_eq!(flow.code(), 0);
+    }
+
+    #[test]
+    fn aliases_expand_once() {
+        let history = History {
+            path: std::env::temp_dir().join(format!("opsh-alias-hist-{}", std::process::id())),
+            entries: Vec::new(),
+        };
+        let mut shell = Shell::new(history);
+        shell.dispatch("alias greet=true").unwrap();
+        let flow = shell.dispatch("greet hello").unwrap();
+        assert_eq!(flow.code(), 0);
+        let which = shell.dispatch("which greet").unwrap();
+        assert_eq!(which.code(), 0);
+        shell.dispatch("unalias greet").unwrap();
+        let missing = shell.dispatch("which greet").unwrap();
+        assert_eq!(missing.code(), 1);
+    }
+
+    #[test]
+    fn loads_rc_aliases_from_file() {
+        let directory = std::env::temp_dir().join(format!("opsh-rc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let rc = directory.join("rc");
+        fs::write(&rc, "alias hi=true\n").unwrap();
+        // The shell is single-threaded; changing its process environment is intentional here.
+        unsafe { env::set_var("OPSH_RC", &rc) };
+
+        let history = History {
+            path: directory.join("history"),
+            entries: Vec::new(),
+        };
+        let mut shell = Shell::new(history);
+        shell.load_rc().unwrap();
+        let flow = shell.dispatch("hi").unwrap();
+        assert_eq!(flow.code(), 0);
+
+        unsafe { env::remove_var("OPSH_RC") };
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]

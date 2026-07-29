@@ -52,6 +52,7 @@ opsh --help
 | `touch FILE...` | Create files when absent |
 | `open PATH` | Open with the desktop default application |
 | `set NAME VALUE` / `unset NAME` | Change the shell environment |
+| `alias` / `unalias` | List, define or remove aliases |
 | `source FILE` / `. FILE` | Run local opsh commands |
 | `repeat N COMMAND` / `time COMMAND` | Repeat or time an external command |
 | `clear` | Clear the interactive screen |
@@ -67,11 +68,21 @@ External commands run through `/bin/sh` by default (or `$OPSH_SHELL`, or a non-f
 cargo install opsh
 ```
 
-Arch users can build from `packaging/aur/PKGBUILD` (tag `v0.1.4` on GitHub).
+Arch: install the AUR package `opsh` (CI publishes on each `v*` tag). Setup notes are in `packaging/aur/README.md`.
 
 ## Local state
 
-History is stored at `$XDG_STATE_HOME/opsh/history`, or `~/.local/state/opsh/history` when XDG state is not configured. Set `OPSH_HISTORY` to use a different path. Colors automatically stay out of redirected output and can be disabled with `NO_COLOR=1`.
+History is stored at `$XDG_STATE_HOME/opsh/history`, or `~/.local/state/opsh/history` when XDG state is not configured. Set `OPSH_HISTORY` to use a different path.
+
+Interactive sessions load `$OPSH_RC` when set, otherwise `~/.config/opsh/rc` (or `$XDG_CONFIG_HOME/opsh/rc`). A missing rc file is ignored. Example:
+
+```text
+set EDITOR nvim
+alias g=git
+alias ll=ls -la
+```
+
+Colors automatically stay out of redirected output and can be disabled with `NO_COLOR=1`.
 
 No daemon, account, telemetry or cloud service is involved.
 

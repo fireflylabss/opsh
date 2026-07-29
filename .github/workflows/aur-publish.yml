@@ -1,0 +1,60 @@
+name: aur-publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to publish (e.g. v0.1.5)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  aur-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - name: Prepare PKGBUILD
+        id: pkg
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.name }}"
+          VERSION="${TAG#v}"
+          TARBALL_URL="https://github.com/fireflylabss/opsh/archive/refs/tags/${TAG}.tar.gz"
+          curl -fsSL "$TARBALL_URL" -o /tmp/opsh-source.tar.gz
+          SHA256="$(sha256sum /tmp/opsh-source.tar.gz | awk '{print $1}')"
+
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/aur/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/aur/PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${SHA256}')/" packaging/aur/PKGBUILD
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Prepared packaging/aur/PKGBUILD for ${VERSION} (${SHA256})"
+
+      - name: Publish AUR package
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        with:
+          pkgname: opsh
+          pkgbuild: ./packaging/aur/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update opsh to ${{ steps.pkg.outputs.version }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
