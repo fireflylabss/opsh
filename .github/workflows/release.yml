@@ -32,34 +32,13 @@ jobs:
           echo "name=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-  crates-io:
-    needs: resolve
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.resolve.outputs.tag }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "Missing secret CARGO_REGISTRY_TOKEN" >&2
-            exit 1
-          fi
-          cargo publish --locked
-
   aur:
     needs: resolve
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: main
           fetch-depth: 0
 
       - name: Bump PKGBUILD + .SRCINFO
@@ -88,3 +67,37 @@ jobs:
           commit_email: horizzon3507@users.noreply.github.com
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_message: Update to ${{ needs.resolve.outputs.version }}
+
+  crates-io:
+    needs: resolve
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "Missing secret CARGO_REGISTRY_TOKEN" >&2
+            exit 1
+          fi
+          set +e
+          output="$(cargo publish --locked 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          if printf '%s\n' "$output" | grep -qi 'already exists'; then
+            echo "Version already on crates.io — treating as success"
+            exit 0
+          fi
+          exit "$status"
