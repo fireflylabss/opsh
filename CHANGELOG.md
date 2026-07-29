@@ -2,6 +2,27 @@
 
 All notable changes to opsh are documented here.
 
+## 0.1.3 — 2026-07-29
+
+### Added
+
+- `pushd`, `popd` and `dirs` for an in-session directory stack.
+- `path` and `get` for compact environment inspection.
+- `repeat N COMMAND` and `time COMMAND` for repeated and timed commands.
+- Interactive line editing with history recall (↑/↓), Ctrl+C handling and tab completion for built-ins and paths (`rustyline`).
+- GitHub Actions CI for format, tests and release builds.
+- `OPSH_SHELL` to choose the POSIX shell used for external commands.
+
+### Changed
+
+- External and compound commands no longer run through fish: only `/bin/sh`, `$OPSH_SHELL`, or a non-fish `$SHELL`, so fish built-ins stay out of opsh.
+- Built-in lines that contain shell operators (`&&`, `|`, `;`, redirects, …) are handed to that command shell instead of being truncated by the built-in matcher.
+- `repeat` and `time` can wrap built-ins as well as external commands.
+- History is written atomically (temp file + rename).
+- `source` rejects nesting deeper than 32 levels.
+- `which` only reports executables on Unix.
+- `opsh --help` lists every built-in.
+
 ## 0.1.1 — 2026-07-28
 
 ### Added
@@ -22,4 +43,4 @@ All notable changes to opsh are documented here.
 ### Added
 
 - Initial Rust shell with `cd`, `pwd`, `history`, `clear`, `help` and `exit`.
-- Local persistent history and `$SHELL` execution for external commands.
+- Local persistent history and shell execution for external commands.

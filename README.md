@@ -2,7 +2,7 @@
 
 **opsh** — a small, local-first shell written in Rust.
 
-It keeps the interface deliberately quiet: a color-aware prompt, useful local history and a compact set of built-ins. Everything else is passed to your configured system shell, so familiar pipes, redirects, environment variables and scripts keep working.
+It keeps the interface deliberately quiet: a color-aware prompt, local history with ↑/↓ recall, tab completion and a compact set of built-ins. Everything else is passed to your configured system shell, so familiar pipes, redirects, environment variables and scripts keep working.
 
 ```text
 ◆ opsh  local shell
@@ -42,21 +42,24 @@ opsh --help
 |---|---|
 | `cd [DIR]` | Change the current directory; defaults to `HOME` |
 | `pwd` | Print the current directory |
+| `pushd DIR` / `popd` / `dirs` | Navigate through a local directory stack |
 | `history` | List commands saved locally |
 | `status` | Show the previous command status |
 | `which CMD` | Locate a built-in or executable |
+| `path` / `get NAME` | Inspect `PATH` or one environment variable |
 | `mkdir DIR...` | Create directories |
 | `mkcd DIR` | Create and enter a directory |
 | `touch FILE...` | Create files when absent |
 | `open PATH` | Open with the desktop default application |
 | `set NAME VALUE` / `unset NAME` | Change the shell environment |
 | `source FILE` / `. FILE` | Run local opsh commands |
+| `repeat N COMMAND` / `time COMMAND` | Repeat or time an external command |
 | `clear` | Clear the interactive screen |
 | `about` | Show version and project information |
 | `help` | Show built-ins |
 | `exit [N]` | Leave with optional status code |
 
-External commands run through `$SHELL`, falling back to `/bin/sh`. This means shell syntax such as `|`, `>`, `&&`, `$(...)` and `$VARIABLE` has the expected behavior.
+External commands run through `/bin/sh` by default (or `$OPSH_SHELL`, or a non-fish `$SHELL`). Fish is never used as the command shell, so only real apps and POSIX syntax are available — not fish built-ins. Lines that start with a built-in but include operators such as `|`, `>`, `&&` or `$(...)` are handed to that same shell (so `cd /tmp && ls` is not truncated to a bare `cd`).
 
 ## Local state
 
