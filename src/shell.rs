@@ -124,7 +124,11 @@ impl Completer for OpshCompleter {
         let is_first_word = before[..start].chars().all(char::is_whitespace);
 
         if is_first_word {
-            let matches = BUILTINS
+            if prefix.starts_with('.') || prefix.starts_with('/') || prefix.starts_with('~') {
+                return self.files.complete(line, pos, ctx);
+            }
+
+            let mut matches = BUILTINS
                 .iter()
                 .filter(|name| name.starts_with(prefix) && **name != ".")
                 .map(|name| Pair {
@@ -132,6 +136,21 @@ impl Completer for OpshCompleter {
                     replacement: (*name).to_owned(),
                 })
                 .collect::<Vec<_>>();
+
+            for name in path_executables_matching(prefix) {
+                if matches
+                    .iter()
+                    .any(|candidate| candidate.replacement == name)
+                {
+                    continue;
+                }
+                matches.push(Pair {
+                    display: name.clone(),
+                    replacement: name,
+                });
+            }
+
+            matches.sort_by(|left, right| left.replacement.cmp(&right.replacement));
             if !matches.is_empty() {
                 return Ok((start, matches));
             }
@@ -247,14 +266,42 @@ impl Shell {
     }
 
     fn dispatch(&mut self, command: &str) -> Result<Flow, String> {
-        let words = split_words(command);
+        if needs_posix_shell(command) {
+            return self.external(command);
+        }
+        if has_chain_operators(command) {
+            return self.run_chain(command);
+        }
+        self.dispatch_simple(command)
+    }
+
+    fn run_chain(&mut self, command: &str) -> Result<Flow, String> {
+        let (segments, operators) = split_chain(command)?;
+        let mut status = 0;
+        for (index, segment) in segments.iter().enumerate() {
+            if index > 0 {
+                let should_run = match operators[index - 1] {
+                    ChainOp::And => status == 0,
+                    ChainOp::Or => status != 0,
+                    ChainOp::Seq => true,
+                };
+                if !should_run {
+                    continue;
+                }
+            }
+            match self.dispatch_simple(segment)? {
+                Flow::Continue(code) => status = code,
+                Flow::Exit(code) => return Ok(Flow::Exit(code)),
+            }
+        }
+        Ok(Flow::Continue(status))
+    }
+
+    fn dispatch_simple(&mut self, command: &str) -> Result<Flow, String> {
+        let words = split_words(command)?;
         let Some(name) = words.first().map(String::as_str) else {
             return Ok(Flow::Continue(0));
         };
-
-        if is_builtin(name) && has_shell_operators(command) {
-            return self.external(command);
-        }
 
         match name {
             "cd" => self.cd(words.get(1).map(String::as_str)),
@@ -586,7 +633,7 @@ impl Shell {
 
     fn help(&self) -> Result<Flow, String> {
         println!(
-            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}External commands run through /bin/sh (or $OPSH_SHELL / a non-fish $SHELL),\nso pipes and redirects work without fish built-ins. Compound built-in lines\nare handed to that same shell.{}",
+            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
             self.paint(BOLD),
             self.paint(RESET),
             self.paint(DIM),
@@ -724,18 +771,104 @@ impl Flow {
     }
 }
 
-fn split_words(command: &str) -> Vec<String> {
-    command.split_whitespace().map(str::to_owned).collect()
+fn split_words(command: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while let Some(character) = chars.next() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if !in_single => {
+                if in_double {
+                    match chars.peek() {
+                        Some('"' | '\\' | '$' | '`') => escaped = true,
+                        _ => current.push('\\'),
+                    }
+                } else {
+                    escaped = true;
+                }
+            }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            character if character.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+
+    if in_single || in_double {
+        return Err("unclosed quote".into());
+    }
+    if escaped {
+        return Err("trailing backslash".into());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Ok(words)
 }
 
 fn command_tail(input: &str, skip_words: usize) -> Option<&str> {
-    let mut words = input.match_indices(char::is_whitespace);
-    let mut start = 0;
+    let trimmed = input.trim_start();
+    let mut rest = trimmed;
     for _ in 0..skip_words {
-        let (index, whitespace) = words.next()?;
-        start = index + whitespace.len();
+        rest = skip_one_word(rest)?;
+        rest = rest.trim_start();
     }
-    input.get(start..).map(str::trim_start)
+    if rest.is_empty() { None } else { Some(rest) }
+}
+
+fn skip_one_word(input: &str) -> Option<&str> {
+    let mut chars = input.char_indices().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut started = false;
+
+    while let Some((index, character)) = chars.next() {
+        if escaped {
+            escaped = false;
+            started = true;
+            continue;
+        }
+        match character {
+            '\\' if !in_single => {
+                escaped = true;
+                started = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                started = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                started = true;
+            }
+            character if character.is_whitespace() && !in_single && !in_double => {
+                if started {
+                    return Some(&input[index..]);
+                }
+            }
+            _ => started = true,
+        }
+    }
+
+    if started && !in_single && !in_double && !escaped {
+        Some("")
+    } else {
+        None
+    }
 }
 
 fn parse_exit_code(value: Option<&String>) -> Result<i32, String> {
@@ -798,43 +931,215 @@ fn is_fish_shell(shell: &str) -> bool {
         .is_some_and(|name| name == "fish" || name.starts_with("fish-"))
 }
 
-/// True when the command contains unquoted shell operators that the command shell should handle.
-fn has_shell_operators(command: &str) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChainOp {
+    And,
+    Or,
+    Seq,
+}
+
+fn has_chain_operators(command: &str) -> bool {
+    scan_operators(command).any(|operator| {
+        matches!(
+            operator,
+            ScannedOperator::And | ScannedOperator::Or | ScannedOperator::Seq
+        )
+    })
+}
+
+/// Pipes, redirects, subshells and background jobs still need a POSIX shell.
+fn needs_posix_shell(command: &str) -> bool {
+    scan_operators(command).any(|operator| {
+        matches!(
+            operator,
+            ScannedOperator::Pipe
+                | ScannedOperator::Redirect
+                | ScannedOperator::Substitution
+                | ScannedOperator::Subshell
+                | ScannedOperator::Background
+        )
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ScannedOperator {
+    And,
+    Or,
+    Seq,
+    Pipe,
+    Redirect,
+    Substitution,
+    Subshell,
+    Background,
+}
+
+fn scan_operators(command: &str) -> impl Iterator<Item = ScannedOperator> + '_ {
     let mut chars = command.chars().peekable();
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
     let mut previous = None::<char>;
+    std::iter::from_fn(move || {
+        while let Some(character) = chars.next() {
+            if escaped {
+                escaped = false;
+                previous = Some(character);
+                continue;
+            }
+            let operator = !in_single && !in_double;
+            let found = match character {
+                '\\' if !in_single => {
+                    escaped = true;
+                    None
+                }
+                '\'' if !in_double => {
+                    in_single = !in_single;
+                    None
+                }
+                '"' if !in_single => {
+                    in_double = !in_double;
+                    None
+                }
+                '|' if operator => {
+                    if chars.peek() == Some(&'|') {
+                        chars.next();
+                        Some(ScannedOperator::Or)
+                    } else {
+                        Some(ScannedOperator::Pipe)
+                    }
+                }
+                ';' if operator => Some(ScannedOperator::Seq),
+                '<' | '>' if operator => Some(ScannedOperator::Redirect),
+                '`' if operator => Some(ScannedOperator::Substitution),
+                '&' if operator => {
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                        Some(ScannedOperator::And)
+                    } else {
+                        let at_token_boundary = previous.is_none_or(char::is_whitespace);
+                        let next_is_boundary = chars.peek().is_none_or(|next| next.is_whitespace());
+                        if at_token_boundary || next_is_boundary {
+                            Some(ScannedOperator::Background)
+                        } else {
+                            None
+                        }
+                    }
+                }
+                '$' if operator && chars.peek() == Some(&'(') => {
+                    Some(ScannedOperator::Substitution)
+                }
+                '(' if operator => Some(ScannedOperator::Subshell),
+                _ => None,
+            };
+            previous = Some(character);
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    })
+}
+
+fn split_chain(command: &str) -> Result<(Vec<String>, Vec<ChainOp>), String> {
+    let mut segments = Vec::new();
+    let mut operators = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
 
     while let Some(character) = chars.next() {
         if escaped {
+            current.push(character);
             escaped = false;
-            previous = Some(character);
             continue;
         }
         let operator = !in_single && !in_double;
         match character {
-            '\\' if !in_single => escaped = true,
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '|' | ';' | '<' | '>' | '`' if operator => return true,
-            '&' if operator => {
-                if chars.peek() == Some(&'&') {
-                    return true;
-                }
-                let at_token_boundary = previous.is_none_or(char::is_whitespace);
-                let next_is_boundary = chars.peek().is_none_or(|next| next.is_whitespace());
-                if at_token_boundary || next_is_boundary {
-                    return true;
+            '\\' if !in_single => {
+                current.push('\\');
+                escaped = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                current.push('\'');
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push('"');
+            }
+            '&' if operator && chars.peek() == Some(&'&') => {
+                chars.next();
+                push_chain_segment(&mut segments, &mut current)?;
+                operators.push(ChainOp::And);
+            }
+            '|' if operator && chars.peek() == Some(&'|') => {
+                chars.next();
+                push_chain_segment(&mut segments, &mut current)?;
+                operators.push(ChainOp::Or);
+            }
+            ';' if operator => {
+                push_chain_segment(&mut segments, &mut current)?;
+                operators.push(ChainOp::Seq);
+            }
+            _ => current.push(character),
+        }
+    }
+
+    if in_single || in_double {
+        return Err("unclosed quote".into());
+    }
+    push_chain_segment(&mut segments, &mut current)?;
+    if segments.len() != operators.len() + 1 {
+        return Err("invalid command chain".into());
+    }
+    Ok((segments, operators))
+}
+
+fn push_chain_segment(segments: &mut Vec<String>, current: &mut String) -> Result<(), String> {
+    let segment = std::mem::take(current);
+    let trimmed = segment.trim();
+    if trimmed.is_empty() {
+        return Err("empty command in chain".into());
+    }
+    segments.push(trimmed.to_owned());
+    Ok(())
+}
+
+fn path_executables_matching(prefix: &str) -> Vec<String> {
+    const MAX_MATCHES: usize = 64;
+    let Some(path) = env::var_os("PATH") else {
+        return Vec::new();
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for directory in env::split_paths(&path) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with(prefix) || names.contains(name) {
+                continue;
+            }
+            if is_executable(&entry.path()) {
+                names.insert(name.to_owned());
+                if names.len() >= MAX_MATCHES {
+                    return names.into_iter().collect();
                 }
             }
-            '$' if operator && chars.peek() == Some(&'(') => return true,
-            '(' if operator => return true,
-            _ => {}
         }
-        previous = Some(character);
     }
-    false
+    names.into_iter().collect()
 }
 
 fn is_valid_env_key(value: &str) -> bool {
@@ -909,6 +1214,7 @@ mod tests {
     fn extracts_command_tails() {
         assert_eq!(command_tail("time echo hello", 1), Some("echo hello"));
         assert_eq!(command_tail("repeat 3 echo hello", 1), Some("3 echo hello"));
+        assert_eq!(command_tail(r#"time echo "a b""#, 1), Some(r#"echo "a b""#));
         assert_eq!(command_tail("repeat", 2), None);
     }
 
@@ -923,16 +1229,32 @@ mod tests {
     }
 
     #[test]
-    fn detects_shell_operators_outside_quotes() {
-        assert!(has_shell_operators("cd /tmp && ls"));
-        assert!(has_shell_operators("mkdir a; cd a"));
-        assert!(has_shell_operators("echo hi | wc"));
-        assert!(has_shell_operators("cat < file"));
-        assert!(has_shell_operators("echo $(pwd)"));
-        assert!(!has_shell_operators("cd /tmp"));
-        assert!(!has_shell_operators("mkdir 'a && b'"));
-        assert!(!has_shell_operators(r#"echo "a|b""#));
-        assert!(!has_shell_operators("set NAME a&b"));
+    fn splits_quoted_words() {
+        assert_eq!(
+            split_words(r#"mkdir "my dir""#).unwrap(),
+            vec!["mkdir".to_owned(), "my dir".to_owned()]
+        );
+        assert_eq!(
+            split_words("touch 'a b' c").unwrap(),
+            vec!["touch".to_owned(), "a b".to_owned(), "c".to_owned()]
+        );
+        assert!(split_words(r#"echo "open"#).is_err());
+    }
+
+    #[test]
+    fn classifies_chain_versus_posix_operators() {
+        assert!(has_chain_operators("cd /tmp && ls"));
+        assert!(has_chain_operators("mkdir a; cd a"));
+        assert!(has_chain_operators("false || true"));
+        assert!(!has_chain_operators("echo hi | wc"));
+        assert!(!needs_posix_shell("cd /tmp && ls"));
+        assert!(needs_posix_shell("echo hi | wc"));
+        assert!(needs_posix_shell("cat < file"));
+        assert!(needs_posix_shell("echo $(pwd)"));
+        assert!(!needs_posix_shell("cd /tmp"));
+        assert!(!has_chain_operators("mkdir 'a && b'"));
+        assert!(!needs_posix_shell(r#"echo "a|b""#));
+        assert!(!needs_posix_shell("set NAME a&b"));
     }
 
     #[test]
@@ -976,23 +1298,61 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_routes_compound_builtin_lines_to_external() {
+    fn chain_cd_persists_in_process() {
         let _guard = CWD_LOCK.lock().unwrap();
-        let directory = std::env::temp_dir().join(format!("opsh-compound-{}", std::process::id()));
+        let original = env::current_dir().unwrap();
+        let directory = std::env::temp_dir().join(format!("opsh-chain-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let marker = directory.join("ok");
+        let nested = directory.join("nested");
+        fs::create_dir_all(&nested).unwrap();
 
         let history = History {
             path: directory.join("history"),
             entries: Vec::new(),
         };
         let mut shell = Shell::new(history);
-        let command = format!("cd {} && touch ok", directory.display());
+        let command = format!("cd {} && touch ok", nested.display());
         let flow = shell.dispatch(&command).unwrap();
         assert_eq!(flow.code(), 0);
-        assert!(marker.exists());
+        assert_eq!(env::current_dir().unwrap(), nested);
+        assert!(nested.join("ok").exists());
+
+        env::set_current_dir(&original).unwrap();
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn quoted_mkdir_creates_spaced_directory() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = env::current_dir().unwrap();
+        let directory = std::env::temp_dir().join(format!("opsh-quotes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        env::set_current_dir(&directory).unwrap();
+
+        let history = History {
+            path: directory.join("history"),
+            entries: Vec::new(),
+        };
+        let mut shell = Shell::new(history);
+        let flow = shell.dispatch(r#"mkdir "my dir""#).unwrap();
+        assert_eq!(flow.code(), 0);
+        assert!(directory.join("my dir").is_dir());
+
+        env::set_current_dir(&original).unwrap();
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn pipes_still_use_posix_shell() {
+        let history = History {
+            path: std::env::temp_dir().join(format!("opsh-pipe-hist-{}", std::process::id())),
+            entries: Vec::new(),
+        };
+        let mut shell = Shell::new(history);
+        let flow = shell.dispatch("true | true").unwrap();
+        assert_eq!(flow.code(), 0);
     }
 
     #[test]

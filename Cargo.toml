@@ -1,14 +1,18 @@
 [package]
 name = "opsh"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 description = "opsh — a small, local-first shell"
-authors = ["AEFireflyLabs"]
+authors = ["horizzon3507 <148660626+horizzon3507@users.noreply.github.com>"]
 license = "Apache-2.0"
 readme = "README.md"
+homepage = "https://github.com/fireflylabss/opsh"
+repository = "https://github.com/fireflylabss/opsh"
+documentation = "https://github.com/fireflylabss/opsh#readme"
 keywords = ["shell", "terminal", "cli", "rust"]
 categories = ["command-line-utilities"]
+exclude = ["target/", ".github/"]
 
 [[bin]]
 name = "opsh"

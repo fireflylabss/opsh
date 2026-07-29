@@ -59,7 +59,15 @@ opsh --help
 | `help` | Show built-ins |
 | `exit [N]` | Leave with optional status code |
 
-External commands run through `/bin/sh` by default (or `$OPSH_SHELL`, or a non-fish `$SHELL`). Fish is never used as the command shell, so only real apps and POSIX syntax are available — not fish built-ins. Lines that start with a built-in but include operators such as `|`, `>`, `&&` or `$(...)` are handed to that same shell (so `cd /tmp && ls` is not truncated to a bare `cd`).
+External commands run through `/bin/sh` by default (or `$OPSH_SHELL`, or a non-fish `$SHELL`). Fish is never used as the command shell. `&&`, `||` and `;` run inside opsh so `cd` persists; pipes, redirects and `$(...)` still go to that POSIX shell.
+
+### Install from crates.io
+
+```bash
+cargo install opsh
+```
+
+Arch users can build from `packaging/aur/PKGBUILD` (tag `v0.1.4` on GitHub).
 
 ## Local state
 

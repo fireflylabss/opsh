@@ -2,6 +2,19 @@
 
 All notable changes to opsh are documented here.
 
+## 0.1.4 — 2026-07-29
+
+### Added
+
+- In-process `&&`, `||` and `;` chains so `cd` persists across segments.
+- Tab completion for executables on `PATH` (alongside built-ins).
+- Quote-aware argument splitting for built-ins (`mkdir "my dir"`).
+- Packaging metadata for crates.io and an AUR `PKGBUILD` under `packaging/aur/`.
+
+### Changed
+
+- Pipes, redirects, substitutions and background jobs still use `/bin/sh` (or `$OPSH_SHELL` / a non-fish `$SHELL`); chain operators no longer force a subshell.
+
 ## 0.1.3 — 2026-07-29
 
 ### Added
