@@ -9,16 +9,17 @@ use std::time::Instant;
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
 use rustyline::hint::HistoryHinter;
-use rustyline::{Config, Context, Editor, Helper, Highlighter, Hinter, Validator};
+use rustyline::{Config, Context, Editor, Helper, Hinter, Validator};
 
 const MAX_HISTORY: usize = 1_000;
 const MAX_SOURCE_DEPTH: usize = 32;
 
 const BUILTINS: &[&str] = &[
-    ".", "about", "alias", "cd", "clear", "dirs", "exit", "get", "help", "history", "mkcd",
-    "mkdir", "open", "path", "popd", "pushd", "pwd", "repeat", "set", "source", "status", "time",
-    "touch", "unalias", "unset", "which",
+    ".", "about", "alias", "cd", "clear", "config", "dirs", "exit", "get", "help", "history",
+    "mkcd", "mkdir", "open", "path", "popd", "pushd", "pwd", "repeat", "set", "source", "status",
+    "time", "touch", "unalias", "unset", "which",
 ];
 
 const RESET: &str = "\x1b[0m";
@@ -35,6 +36,7 @@ pub struct Shell {
     history: History,
     interactive: bool,
     color: bool,
+    quiet: bool,
     previous_dir: Option<PathBuf>,
     directory_stack: Vec<PathBuf>,
     last_status: i32,
@@ -97,12 +99,18 @@ fn temporary_history_path(path: &Path) -> PathBuf {
     PathBuf::from(temporary)
 }
 
-#[derive(Helper, rustyline::Completer, Hinter, Highlighter, Validator)]
+#[derive(Helper, rustyline::Completer, Hinter, Validator)]
 struct OpshHelper {
     #[rustyline(Completer)]
     completer: OpshCompleter,
     #[rustyline(Hinter)]
     hinter: HistoryHinter,
+}
+
+impl Highlighter for OpshHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
+        std::borrow::Cow::Owned(format!("\x1b[2m{hint}\x1b[0m"))
+    }
 }
 
 struct OpshCompleter {
@@ -180,7 +188,12 @@ impl Completer for OpshCompleter {
 }
 
 impl Shell {
+    #[allow(dead_code)]
     pub fn new(history: History) -> Self {
+        Self::with_options(history, false)
+    }
+
+    pub fn with_options(history: History, quiet: bool) -> Self {
         let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
         let color = interactive
             && env::var_os("NO_COLOR").is_none()
@@ -189,6 +202,7 @@ impl Shell {
             history,
             interactive,
             color,
+            quiet,
             previous_dir: None,
             directory_stack: Vec::new(),
             last_status: 0,
@@ -200,13 +214,28 @@ impl Shell {
     pub fn repl(&mut self) -> Result<i32, String> {
         if self.interactive {
             if let Err(error) = self.load_rc() {
-                eprintln!("{}opsh:{} {error}", self.paint(YELLOW), self.paint(RESET));
+                eprintln!("{}opsh:{} {error}", self.ansi_err(), self.ansi_reset());
                 self.last_status = 1;
             }
-            self.banner();
+            if self.banner_enabled() {
+                self.banner();
+            }
             return self.interactive_repl();
         }
         self.batch_repl()
+    }
+
+    fn banner_enabled(&self) -> bool {
+        if self.quiet {
+            return false;
+        }
+        match env::var("OPSH_BANNER") {
+            Ok(value) => !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            ),
+            Err(_) => true,
+        }
     }
 
     fn load_rc(&mut self) -> Result<(), String> {
@@ -251,7 +280,7 @@ impl Shell {
                         }
                         Err(error) => {
                             self.last_status = 1;
-                            eprintln!("{}opsh:{} {error}", self.paint(RED), self.paint(RESET));
+                            eprintln!("{}opsh:{} {error}", self.ansi_err(), self.ansi_reset());
                         }
                     }
                 }
@@ -390,6 +419,7 @@ impl Shell {
             "repeat" => self.repeat(command),
             "time" => self.time(command),
             "clear" => self.clear(),
+            "config" => self.config(),
             "help" => self.help(),
             "about" => self.about(),
             "exit" => Ok(Flow::Exit(parse_exit_code(words.get(1))?)),
@@ -472,15 +502,15 @@ impl Shell {
 
     fn status(&self) -> Result<Flow, String> {
         let (color, label) = if self.last_status == 0 {
-            (GREEN, "ok")
+            (self.ansi_ok(), "ok")
         } else {
-            (RED, "failed")
+            (self.ansi_err(), "failed")
         };
         println!(
             "{}{}{}  exit {}",
-            self.paint(color),
+            color,
             label,
-            self.paint(RESET),
+            self.ansi_reset(),
             self.last_status
         );
         Ok(Flow::Continue(0))
@@ -778,13 +808,13 @@ impl Shell {
 
     fn help(&self) -> Result<Flow, String> {
         println!(
-            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in, alias or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {alias} [N[=V]]  list or define aliases\n  {unalias} NAME   remove aliases\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}Interactive sessions load ~/.config/opsh/rc (or $OPSH_RC).\n&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
+            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in, alias or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {alias} [N[=V]]  list or define aliases\n  {unalias} NAME   remove aliases\n  {config}         show active UI / config knobs\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}Interactive sessions load ~/.config/opsh/rc (or $OPSH_RC).\nCustomize with OPSH_PROMPT, OPSH_PROMPT_STYLE, OPSH_BANNER and OPSH_COLOR_*.\n&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
             self.paint(BOLD),
-            self.paint(RESET),
+            self.ansi_reset(),
             self.paint(DIM),
-            self.paint(RESET),
+            self.ansi_reset(),
             self.paint(DIM),
-            self.paint(RESET),
+            self.ansi_reset(),
             cd = self.command("cd"),
             pwd = self.command("pwd"),
             pushd = self.command("pushd"),
@@ -803,6 +833,7 @@ impl Shell {
             unset = self.command("unset"),
             alias = self.command("alias"),
             unalias = self.command("unalias"),
+            config = self.command("config"),
             source = self.command("source"),
             repeat = self.command("repeat"),
             time = self.command("time"),
@@ -839,52 +870,148 @@ impl Shell {
         println!(
             "{}◆ opsh{}  {}local shell{}\n  {}built-ins{}  cd · mkcd · which · source · help\n",
             self.paint(BOLD),
-            self.paint(RESET),
+            self.ansi_reset(),
             self.paint(DIM),
-            self.paint(RESET),
-            self.paint(VIOLET),
-            self.paint(RESET)
+            self.ansi_reset(),
+            self.ansi_accent(),
+            self.ansi_reset()
         );
     }
 
     fn prompt_pair(&self) -> (String, String) {
-        let directory = env::current_dir()
-            .ok()
-            .and_then(|path| compact_path(&path))
-            .unwrap_or_else(|| "?".into());
-        let raw_status = if self.last_status == 0 {
-            String::new()
-        } else {
-            format!(" ×{}", self.last_status)
-        };
-        let styled_status = if self.last_status == 0 {
-            String::new()
-        } else {
-            format!(
-                " {}×{}{}",
-                self.paint(RED),
-                self.last_status,
-                self.paint(RESET)
-            )
-        };
-        let mark = if self.last_status == 0 { GREEN } else { RED };
-        let raw = format!("◆ {directory}{raw_status}\n› ");
-        let styled = format!(
-            "{}◆{} {}{}{}{}\n{}›{} ",
-            self.paint(mark),
-            self.paint(RESET),
-            self.paint(BLUE),
-            directory,
-            self.paint(RESET),
-            styled_status,
-            self.paint(YELLOW),
-            self.paint(RESET)
-        );
+        let template = prompt_template();
+        let raw = self.render_prompt(&template, false);
+        let styled = self.render_prompt(&template, true);
         (raw, styled)
     }
 
+    fn render_prompt(&self, template: &str, styled: bool) -> String {
+        let cwd = env::current_dir()
+            .ok()
+            .and_then(|path| compact_path(&path))
+            .unwrap_or_else(|| "?".into());
+        let cwd_full = env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "?".into());
+        let status = if self.last_status == 0 {
+            String::new()
+        } else if styled {
+            format!(
+                " {}×{}{}",
+                self.ansi_err(),
+                self.last_status,
+                self.ansi_reset()
+            )
+        } else {
+            format!(" ×{}", self.last_status)
+        };
+        let mark = if styled {
+            let color = if self.last_status == 0 {
+                self.ansi_ok()
+            } else {
+                self.ansi_err()
+            };
+            format!("{color}◆{}", self.ansi_reset())
+        } else {
+            "◆".into()
+        };
+        let prompt = if styled {
+            format!("{}›{}", self.ansi_mark(), self.ansi_reset())
+        } else {
+            "›".into()
+        };
+        let stack = self.stack_token(styled);
+        let cwd_styled = if styled {
+            format!("{}{cwd}{}", self.ansi_path(), self.ansi_reset())
+        } else {
+            cwd.clone()
+        };
+        let cwd_full_styled = if styled {
+            format!("{}{cwd_full}{}", self.ansi_path(), self.ansi_reset())
+        } else {
+            cwd_full.clone()
+        };
+
+        template
+            .replace("{cwd:full}", &cwd_full_styled)
+            .replace("{cwd}", &cwd_styled)
+            .replace("{status}", &status)
+            .replace("{mark}", &mark)
+            .replace("{prompt}", &prompt)
+            .replace("{stack}", &stack)
+    }
+
+    fn stack_token(&self, styled: bool) -> String {
+        if self.directory_stack.is_empty() {
+            return String::new();
+        }
+        let depth = self.directory_stack.len();
+        if styled {
+            format!(" {}·{depth}{}", self.paint(DIM), self.ansi_reset())
+        } else {
+            format!(" ·{depth}")
+        }
+    }
+
+    fn config(&self) -> Result<Flow, String> {
+        let rows = [
+            (
+                "banner",
+                if self.banner_enabled() { "on" } else { "off" }.to_owned(),
+            ),
+            ("quiet", if self.quiet { "on" } else { "off" }.to_owned()),
+            ("color", if self.color { "on" } else { "off" }.to_owned()),
+            (
+                "prompt_style",
+                env::var("OPSH_PROMPT_STYLE").unwrap_or_else(|_| "double".into()),
+            ),
+            (
+                "prompt",
+                env::var("OPSH_PROMPT").unwrap_or_else(|_| prompt_template()),
+            ),
+            (
+                "color.ok",
+                env::var("OPSH_COLOR_OK").unwrap_or_else(|_| "38;5;114".into()),
+            ),
+            (
+                "color.err",
+                env::var("OPSH_COLOR_ERR").unwrap_or_else(|_| "38;5;210".into()),
+            ),
+            (
+                "color.path",
+                env::var("OPSH_COLOR_PATH").unwrap_or_else(|_| "38;5;75".into()),
+            ),
+            (
+                "color.mark",
+                env::var("OPSH_COLOR_MARK").unwrap_or_else(|_| "38;5;221".into()),
+            ),
+            (
+                "color.accent",
+                env::var("OPSH_COLOR_ACCENT").unwrap_or_else(|_| "38;5;183".into()),
+            ),
+            ("shell", command_shell()),
+            ("history", self.history.path.display().to_string()),
+            (
+                "rc",
+                rc_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(unset)".into()),
+            ),
+        ];
+        for (key, value) in rows {
+            println!(
+                "{}{:<14}{} {}",
+                self.paint(DIM),
+                key,
+                self.ansi_reset(),
+                value
+            );
+        }
+        Ok(Flow::Continue(0))
+    }
+
     fn command(&self, name: &str) -> String {
-        format!("{}{}{}", self.paint(CYAN), name, self.paint(RESET))
+        format!("{}{}{}", self.ansi_accent(), name, self.ansi_reset())
     }
 
     fn save_history(&self) {
@@ -892,15 +1019,53 @@ impl Shell {
             if self.interactive {
                 eprintln!(
                     "{}opsh:{} history disabled: {error}",
-                    self.paint(YELLOW),
-                    self.paint(RESET)
+                    self.ansi_mark(),
+                    self.ansi_reset()
                 );
             }
         }
     }
 
-    fn paint(&self, code: &'static str) -> &'static str {
-        if self.color { code } else { "" }
+    fn paint(&self, code: &str) -> String {
+        if self.color {
+            code.to_owned()
+        } else {
+            String::new()
+        }
+    }
+
+    fn ansi_reset(&self) -> String {
+        self.paint(RESET)
+    }
+
+    fn ansi_ok(&self) -> String {
+        self.env_color("OPSH_COLOR_OK", GREEN)
+    }
+
+    fn ansi_err(&self) -> String {
+        self.env_color("OPSH_COLOR_ERR", RED)
+    }
+
+    fn ansi_path(&self) -> String {
+        self.env_color("OPSH_COLOR_PATH", BLUE)
+    }
+
+    fn ansi_mark(&self) -> String {
+        self.env_color("OPSH_COLOR_MARK", YELLOW)
+    }
+
+    fn ansi_accent(&self) -> String {
+        self.env_color("OPSH_COLOR_ACCENT", VIOLET)
+    }
+
+    fn env_color(&self, key: &str, default: &str) -> String {
+        if !self.color {
+            return String::new();
+        }
+        match env::var(key) {
+            Ok(value) => parse_color_value(&value).unwrap_or_else(|| default.to_owned()),
+            Err(_) => default.to_owned(),
+        }
     }
 }
 
@@ -1061,6 +1226,49 @@ fn rc_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|dir| PathBuf::from(dir).join("opsh/rc")))
         .or_else(|| env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".config/opsh/rc")))
+}
+
+fn prompt_template() -> String {
+    if let Ok(template) = env::var("OPSH_PROMPT") {
+        let trimmed = template.trim_matches(|character| character == '\'' || character == '"');
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    match env::var("OPSH_PROMPT_STYLE")
+        .unwrap_or_else(|_| "double".into())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "single" | "one" | "1" => "{mark} {cwd}{status}{stack} {prompt} ".into(),
+        _ => "{mark} {cwd}{status}{stack}\n{prompt} ".into(),
+    }
+}
+
+fn parse_color_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no" | "none"
+        )
+    {
+        return Some(String::new());
+    }
+    if trimmed.starts_with('\u{1b}') || trimmed.starts_with("\\x1b") || trimmed.starts_with("\x1b")
+    {
+        if let Some(rest) = trimmed.strip_prefix("\\x1b") {
+            return Some(format!("\x1b{rest}"));
+        }
+        return Some(trimmed.to_owned());
+    }
+    if trimmed
+        .chars()
+        .all(|character| character.is_ascii_digit() || character == ';')
+    {
+        return Some(format!("\x1b[{trimmed}m"));
+    }
+    None
 }
 
 fn is_valid_alias_name(value: &str) -> bool {
@@ -1567,6 +1775,41 @@ mod tests {
 
         unsafe { env::remove_var("OPSH_RC") };
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn parses_color_values() {
+        assert_eq!(parse_color_value("off"), Some(String::new()));
+        assert_eq!(parse_color_value("38;5;114"), Some("\x1b[38;5;114m".into()));
+        assert_eq!(parse_color_value("\x1b[31m"), Some("\x1b[31m".into()));
+        assert_eq!(parse_color_value("not-a-color"), None);
+    }
+
+    #[test]
+    fn prompt_templates_respect_style_and_override() {
+        unsafe {
+            env::remove_var("OPSH_PROMPT");
+            env::set_var("OPSH_PROMPT_STYLE", "single");
+        }
+        assert!(prompt_template().contains("{prompt} "));
+        assert!(!prompt_template().contains('\n'));
+        unsafe {
+            env::set_var("OPSH_PROMPT_STYLE", "double");
+        }
+        assert!(prompt_template().contains('\n'));
+        unsafe {
+            env::set_var("OPSH_PROMPT", "{mark} {cwd} > ");
+        }
+        assert_eq!(prompt_template(), "{mark} {cwd} > ");
+        unsafe {
+            env::remove_var("OPSH_PROMPT");
+            env::remove_var("OPSH_PROMPT_STYLE");
+        }
+    }
+
+    #[test]
+    fn recognizes_config_builtin() {
+        assert!(is_builtin("config"));
     }
 
     #[test]

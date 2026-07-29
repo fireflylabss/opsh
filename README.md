@@ -53,6 +53,7 @@ opsh --help
 | `open PATH` | Open with the desktop default application |
 | `set NAME VALUE` / `unset NAME` | Change the shell environment |
 | `alias` / `unalias` | List, define or remove aliases |
+| `config` | Show active prompt / color / path knobs |
 | `source FILE` / `. FILE` | Run local opsh commands |
 | `repeat N COMMAND` / `time COMMAND` | Repeat or time an external command |
 | `clear` | Clear the interactive screen |
@@ -80,9 +81,28 @@ Interactive sessions load `$OPSH_RC` when set, otherwise `~/.config/opsh/rc` (or
 set EDITOR nvim
 alias g=git
 alias ll=ls -la
+set OPSH_BANNER 0
+set OPSH_PROMPT_STYLE single
+set OPSH_COLOR_PATH 38;5;81
 ```
 
-Colors automatically stay out of redirected output and can be disabled with `NO_COLOR=1`.
+### Configuration
+
+| Variable | Purpose |
+|---|---|
+| `OPSH_RC` | Startup file path |
+| `OPSH_HISTORY` | History file path |
+| `OPSH_SHELL` | POSIX shell for pipes / redirects (never fish) |
+| `OPSH_BANNER` | `0` / `false` / `off` hides the startup banner (`opsh -q` also hides it) |
+| `OPSH_PROMPT_STYLE` | `double` (default) or `single` |
+| `OPSH_PROMPT` | Custom template; placeholders: `{mark}` `{cwd}` `{cwd:full}` `{status}` `{prompt}` `{stack}` |
+| `OPSH_COLOR_OK` | Success color (default `38;5;114`) |
+| `OPSH_COLOR_ERR` | Failure color (default `38;5;210`) |
+| `OPSH_COLOR_PATH` | Path color (default `38;5;75`) |
+| `OPSH_COLOR_MARK` | `›` color (default `38;5;221`) |
+| `OPSH_COLOR_ACCENT` | Accent / built-in name color (default `38;5;183`) |
+
+Color values accept `38;5;N`, plain ANSI codes, or `off`. Run `config` inside opsh to inspect the active values. Colors stay out of redirected output and can be disabled with `NO_COLOR=1`.
 
 No daemon, account, telemetry or cloud service is involved.
 

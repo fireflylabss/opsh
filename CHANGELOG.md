@@ -2,6 +2,17 @@
 
 All notable changes to opsh are documented here.
 
+## 0.1.6 — 2026-07-29
+
+### Added
+
+- Customizable prompt via `OPSH_PROMPT` placeholders (`{mark}`, `{cwd}`, `{cwd:full}`, `{status}`, `{prompt}`, `{stack}`).
+- `OPSH_PROMPT_STYLE=single|double` and directory-stack depth in the prompt (`{stack}`).
+- Banner control with `OPSH_BANNER` / `opsh -q`.
+- Palette knobs: `OPSH_COLOR_OK`, `OPSH_COLOR_ERR`, `OPSH_COLOR_PATH`, `OPSH_COLOR_MARK`, `OPSH_COLOR_ACCENT`.
+- Dim history hints in the line editor.
+- `config` built-in to inspect active UI / path settings.
+
 ## 0.1.5 — 2026-07-29
 
 ### Added

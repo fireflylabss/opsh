@@ -19,12 +19,14 @@ fn main() -> ExitCode {
 fn run() -> Result<i32, String> {
     let mut args = env::args().skip(1);
     let mut command = None;
+    let mut quiet = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-c" | "--command" => {
                 command = Some(args.next().ok_or("missing command after -c")?);
             }
+            "-q" | "--quiet" => quiet = true,
             "-h" | "--help" => {
                 print_help();
                 return Ok(0);
@@ -38,7 +40,7 @@ fn run() -> Result<i32, String> {
     }
 
     let history = History::open(history_path())?;
-    let mut shell = Shell::new(history);
+    let mut shell = Shell::with_options(history, quiet);
     match command {
         Some(command) => shell.run_command(&command),
         None => shell.repl(),
@@ -59,6 +61,6 @@ fn history_path() -> PathBuf {
 
 fn print_help() {
     println!(
-        "opsh — small local shell\n\nUSAGE:\n    opsh [OPTIONS]\n\nOPTIONS:\n    -c, --command <COMMAND>  Run one command and exit\n    -h, --help               Print this help\n    -V, --version            Print version\n\nBUILT-INS:\n    cd [DIR]          change directory (cd - returns)\n    pwd               print current directory\n    pushd DIR         enter a directory and save the current one\n    popd              return to the last saved directory\n    dirs              show the directory stack\n    history           show saved commands\n    status            show the last exit status\n    which CMD         find a built-in or executable\n    path              print PATH entries\n    get NAME          print one environment variable\n    mkdir DIR...      create directories\n    mkcd DIR          create a directory and enter it\n    touch FILE...     create files if needed\n    open PATH         open with the desktop default app\n    set NAME VALUE    set an environment variable\n    unset NAME        remove an environment variable\n    alias [NAME[=V]]  list or define aliases\n    unalias NAME      remove aliases\n    source FILE       run a local opsh file\n    repeat N CMD      run a command N times\n    time CMD          run a command and show elapsed time\n    clear             clear the screen\n    about             show project information\n    help              show shell help\n    exit [N]          leave opsh\n\nInteractive sessions load ~/.config/opsh/rc (or $OPSH_RC). External commands\nrun through /bin/sh (or $OPSH_SHELL / a non-fish $SHELL). && || ; chains stay\ninside opsh so cd persists; pipes and redirects use that POSIX shell. History\nis saved locally in $XDG_STATE_HOME/opsh."
+        "opsh — small local shell\n\nUSAGE:\n    opsh [OPTIONS]\n\nOPTIONS:\n    -c, --command <COMMAND>  Run one command and exit\n    -q, --quiet              Hide the startup banner\n    -h, --help               Print this help\n    -V, --version            Print version\n\nBUILT-INS:\n    cd [DIR]          change directory (cd - returns)\n    pwd               print current directory\n    pushd DIR         enter a directory and save the current one\n    popd              return to the last saved directory\n    dirs              show the directory stack\n    history           show saved commands\n    status            show the last exit status\n    which CMD         find a built-in or executable\n    path              print PATH entries\n    get NAME          print one environment variable\n    mkdir DIR...      create directories\n    mkcd DIR          create a directory and enter it\n    touch FILE...     create files if needed\n    open PATH         open with the desktop default app\n    set NAME VALUE    set an environment variable\n    unset NAME        remove an environment variable\n    alias [NAME[=V]]  list or define aliases\n    unalias NAME      remove aliases\n    config            show active UI / config knobs\n    source FILE       run a local opsh file\n    repeat N CMD      run a command N times\n    time CMD          run a command and show elapsed time\n    clear             clear the screen\n    about             show project information\n    help              show shell help\n    exit [N]          leave opsh\n\nCONFIG (via environment or set in ~/.config/opsh/rc):\n    OPSH_PROMPT         prompt template with {{cwd}} {{status}} {{mark}} {{prompt}} {{stack}}\n    OPSH_PROMPT_STYLE   double (default) or single\n    OPSH_BANNER         0/false/off to hide the startup banner\n    OPSH_COLOR_OK/ERR/PATH/MARK/ACCENT   ANSI codes (e.g. 38;5;114)\n    OPSH_RC OPSH_HISTORY OPSH_SHELL\n\nInteractive sessions load ~/.config/opsh/rc (or $OPSH_RC). External commands\nrun through /bin/sh (or $OPSH_SHELL / a non-fish $SHELL). && || ; chains stay\ninside opsh so cd persists; pipes and redirects use that POSIX shell."
     );
 }
