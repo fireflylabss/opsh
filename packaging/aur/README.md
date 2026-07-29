@@ -1,29 +1,48 @@
-# AUR package (`opsh`)
+# AUR packaging (`opsh`)
 
-PKGBUILD lives here and is published by `.github/workflows/release.yml` on `v*` tags (together with crates.io).
+Same setup as optionMusic: one SSH key secret, username hardcoded in CI.
 
-## One-time setup
+Published: https://aur.archlinux.org/packages/opsh
 
-1. Create an [AUR account](https://aur.archlinux.org/register) and add an SSH public key under **My Account → SSH Public Key**.
-2. Create the empty AUR package repo once (from a machine with the AUR SSH key):
+## Install
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/aur -C "aur-opsh" -N ""
-# paste ~/.ssh/aur.pub into https://aur.archlinux.org/account/ (SSH Public Key)
-
-GIT_SSH_COMMAND='ssh -i ~/.ssh/aur' git clone ssh://aur@aur.archlinux.org/opsh.git
-# empty repo is fine; CI pushes PKGBUILD + .SRCINFO
+yay -S opsh
+# or
+paru -S opsh
 ```
 
-3. In the GitHub repo **Settings → Secrets and variables → Actions**, add:
+## Automatic publish
 
-| Secret | Value |
-|---|---|
-| `AUR_USERNAME` | Your AUR username |
-| `AUR_EMAIL` | Email on your AUR account |
-| `AUR_SSH_PRIVATE_KEY` | Contents of `~/.ssh/aur` (private key) |
-| `CARGO_REGISTRY_TOKEN` | crates.io API token (already used for crates publish) |
+Every **`v*` tag** (and manual **Actions → release**) runs [`.github/workflows/release.yml`](../../.github/workflows/release.yml):
 
-4. Push a version tag (`v0.1.6`, …) or run **Actions → release → Run workflow**.
+1. Publishes crates.io (`CARGO_REGISTRY_TOKEN`)
+2. Bumps `packaging/aur/PKGBUILD` + `.SRCINFO`
+3. Pushes the package to the AUR (`AUR_SSH_PRIVATE_KEY`)
 
-Until the three `AUR_*` secrets exist, the AUR job fails on purpose; crates.io can still publish.
+### One-time setup
+
+Reuse the same AUR key as optionMusic:
+
+```bash
+gh secret set AUR_SSH_PRIVATE_KEY < ~/.ssh/aur_synara
+```
+
+Public key must already be on the AUR account (it is, if optionMusic publishes).
+
+### Day-to-day
+
+```bash
+git tag -a v0.1.6 -m "opsh 0.1.6"
+git push origin v0.1.6
+# → Actions publishes crates.io + AUR
+```
+
+## Local publish (fallback)
+
+```bash
+./packaging/aur/publish.sh           # push current packaging/
+./packaging/aur/publish.sh 0.1.6     # bump + push
+```
+
+Uses `~/aur/opsh` and `~/.ssh/aur_synara` (override with `AUR_SSH_KEY=` / `AUR_DIR=`).

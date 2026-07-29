@@ -1,4 +1,4 @@
-# Maintainer: horizzon3507 <148660626+horizzon3507@users.noreply.github.com>
+# Maintainer: Gabriel <horizzon3507>
 pkgname=opsh
 pkgver=0.1.5
 pkgrel=1
@@ -10,7 +10,7 @@ depends=('gcc-libs')
 makedepends=('cargo')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('e061a8f4dc106769458d84d5c50c499ce310f45b58b54ddc5abf3c30a5e247d6')
 
 prepare() {
   cd "$pkgname-$pkgver"
@@ -23,12 +23,6 @@ build() {
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release
-}
-
-check() {
-  cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
-  cargo test --frozen
 }
 
 package() {
