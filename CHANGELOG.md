@@ -2,6 +2,12 @@
 
 All notable changes to opsh are documented here.
 
+## 0.1.7 — 2026-07-29
+
+### Changed
+
+- Config and history now live under **`~/.option/opsh/`** (`rc`, `history`). Legacy XDG paths are migrated automatically. `OPSH_RC` / `OPSH_HISTORY` still override.
+
 ## 0.1.6 — 2026-07-29
 
 ### Added
@@ -17,7 +23,7 @@ All notable changes to opsh are documented here.
 
 ### Added
 
-- Interactive startup file at `$OPSH_RC` or `~/.config/opsh/rc`.
+- Interactive startup file at `$OPSH_RC` or `~/.option/opsh/rc`.
 - `alias` / `unalias` built-ins, with tab completion and `which` support.
 - GitHub Actions workflow to publish the AUR package on `v*` tags.
 

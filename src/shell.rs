@@ -808,7 +808,7 @@ impl Shell {
 
     fn help(&self) -> Result<Flow, String> {
         println!(
-            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in, alias or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {alias} [N[=V]]  list or define aliases\n  {unalias} NAME   remove aliases\n  {config}         show active UI / config knobs\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}Interactive sessions load ~/.config/opsh/rc (or $OPSH_RC).\nCustomize with OPSH_PROMPT, OPSH_PROMPT_STYLE, OPSH_BANNER and OPSH_COLOR_*.\n&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
+            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in, alias or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {alias} [N[=V]]  list or define aliases\n  {unalias} NAME   remove aliases\n  {config}         show active UI / config knobs\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}Interactive sessions load ~/.option/opsh/rc (or $OPSH_RC).\nCustomize with OPSH_PROMPT, OPSH_PROMPT_STYLE, OPSH_BANNER and OPSH_COLOR_*.\n&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
             self.paint(BOLD),
             self.ansi_reset(),
             self.paint(DIM),
@@ -1222,10 +1222,27 @@ fn is_builtin(command: &str) -> bool {
 }
 
 fn rc_path() -> Option<PathBuf> {
-    env::var_os("OPSH_RC")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|dir| PathBuf::from(dir).join("opsh/rc")))
-        .or_else(|| env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".config/opsh/rc")))
+    if let Some(path) = env::var_os("OPSH_RC") {
+        return Some(PathBuf::from(path));
+    }
+
+    let canonical = env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".option").join("opsh").join("rc"))?;
+
+    if !canonical.exists() {
+        let legacy = env::var_os("XDG_CONFIG_HOME")
+            .map(|dir| PathBuf::from(dir).join("opsh/rc"))
+            .or_else(|| env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".config/opsh/rc")));
+        if let Some(legacy) = legacy {
+            if legacy.exists() {
+                if let Some(parent) = canonical.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::rename(&legacy, &canonical);
+            }
+        }
+    }
+
+    Some(canonical)
 }
 
 fn prompt_template() -> String {

@@ -73,9 +73,9 @@ Arch: install the AUR package `opsh` (CI publishes on each `v*` tag). Setup note
 
 ## Local state
 
-History is stored at `$XDG_STATE_HOME/opsh/history`, or `~/.local/state/opsh/history` when XDG state is not configured. Set `OPSH_HISTORY` to use a different path.
+History is stored at `~/.option/opsh/history`. Set `OPSH_HISTORY` to use a different path. Legacy XDG state files are migrated automatically.
 
-Interactive sessions load `$OPSH_RC` when set, otherwise `~/.config/opsh/rc` (or `$XDG_CONFIG_HOME/opsh/rc`). A missing rc file is ignored. Example:
+Interactive sessions load `$OPSH_RC` when set, otherwise `~/.option/opsh/rc`. A missing rc file is ignored. Example:
 
 ```text
 set EDITOR nvim
