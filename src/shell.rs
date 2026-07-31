@@ -3,9 +3,9 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
@@ -40,6 +40,8 @@ pub struct Shell {
     previous_dir: Option<PathBuf>,
     directory_stack: Vec<PathBuf>,
     last_status: i32,
+    last_elapsed: Option<Duration>,
+    history_cleared: bool,
     source_depth: usize,
     aliases: Arc<Mutex<BTreeMap<String, String>>>,
 }
@@ -67,6 +69,10 @@ impl History {
         if self.entries.len() > MAX_HISTORY {
             self.entries.drain(..self.entries.len() - MAX_HISTORY);
         }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
     }
 
     fn save(&self) -> Result<(), String> {
@@ -206,6 +212,8 @@ impl Shell {
             previous_dir: None,
             directory_stack: Vec::new(),
             last_status: 0,
+            last_elapsed: None,
+            history_cleared: false,
             source_depth: 0,
             aliases: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -271,22 +279,32 @@ impl Shell {
             let (raw, styled) = self.prompt_pair();
             match editor.readline(&(raw, styled)) {
                 Ok(line) => {
+                    let started = Instant::now();
                     let _ = editor.add_history_entry(line.as_str());
                     match self.execute(&line) {
-                        Ok(Flow::Continue(code)) => self.last_status = code,
+                        Ok(Flow::Continue(code)) => {
+                            self.last_status = code;
+                            self.last_elapsed = Some(started.elapsed());
+                        }
                         Ok(Flow::Exit(code)) => {
                             self.save_history();
                             return Ok(code);
                         }
                         Err(error) => {
                             self.last_status = 1;
+                            self.last_elapsed = Some(started.elapsed());
                             eprintln!("{}opsh:{} {error}", self.ansi_err(), self.ansi_reset());
                         }
+                    }
+                    if self.history_cleared {
+                        let _ = editor.clear_history();
+                        self.history_cleared = false;
                     }
                 }
                 Err(ReadlineError::Interrupted) => {
                     println!("^C");
                     self.last_status = 130;
+                    self.last_elapsed = None;
                 }
                 Err(ReadlineError::Eof) => break,
                 Err(error) => return Err(error.to_string()),
@@ -328,8 +346,12 @@ impl Shell {
         if command.is_empty() || command.starts_with('#') {
             return Ok(Flow::Continue(0));
         }
-        self.history.push(command);
-        self.dispatch(command)
+        let (expanded, changed) = expand_history_refs(command, &self.history.entries)?;
+        if changed {
+            println!("{expanded}");
+        }
+        self.history.push(&expanded);
+        self.dispatch(&expanded)
     }
 
     fn dispatch(&mut self, command: &str) -> Result<Flow, String> {
@@ -402,7 +424,7 @@ impl Shell {
             "pushd" => self.pushd(words.get(1).map(String::as_str)),
             "popd" => self.popd(),
             "dirs" => self.dirs(),
-            "history" => self.history(),
+            "history" => self.history_cmd(&words[1..]),
             "status" => self.status(),
             "which" => self.which(words.get(1).map(String::as_str)),
             "path" => self.path(),
@@ -488,8 +510,43 @@ impl Shell {
         Ok(Flow::Continue(0))
     }
 
-    fn history(&self) -> Result<Flow, String> {
-        for (index, entry) in self.history.entries.iter().enumerate() {
+    fn history_cmd(&mut self, args: &[String]) -> Result<Flow, String> {
+        match args {
+            [] => self.print_history(0),
+            [action] if action == "clear" => {
+                self.history.clear();
+                self.history_cleared = true;
+                self.history.save()?;
+                Ok(Flow::Continue(0))
+            }
+            [count] if count.chars().all(|character| character.is_ascii_digit()) => {
+                let count = count
+                    .parse::<usize>()
+                    .map_err(|_| "history: count is too large".to_owned())?;
+                let start = self.history.entries.len().saturating_sub(count);
+                self.print_history(start)
+            }
+            [query] => {
+                let mut matched = false;
+                for (index, entry) in self.history.entries.iter().enumerate() {
+                    if entry.contains(query.as_str()) {
+                        matched = true;
+                        println!(
+                            "{}{:>4}{}  {entry}",
+                            self.paint(DIM),
+                            index + 1,
+                            self.paint(RESET)
+                        );
+                    }
+                }
+                Ok(Flow::Continue(if matched { 0 } else { 1 }))
+            }
+            _ => Err("history: usage: history [N|clear|QUERY]".into()),
+        }
+    }
+
+    fn print_history(&self, start: usize) -> Result<Flow, String> {
+        for (index, entry) in self.history.entries.iter().enumerate().skip(start) {
             println!(
                 "{}{:>4}{}  {entry}",
                 self.paint(DIM),
@@ -808,7 +865,7 @@ impl Shell {
 
     fn help(&self) -> Result<Flow, String> {
         println!(
-            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history}        show saved commands\n  {status}         show the last exit status\n  {which} CMD      find a built-in, alias or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {alias} [N[=V]]  list or define aliases\n  {unalias} NAME   remove aliases\n  {config}         show active UI / config knobs\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}Interactive sessions load ~/.option/opsh/rc (or $OPSH_RC).\nCustomize with OPSH_PROMPT, OPSH_PROMPT_STYLE, OPSH_BANNER and OPSH_COLOR_*.\n&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
+            "{}◆ opsh built-ins{}\n\n  {cd} [DIR]       change directory ({}cd -{} returns)\n  {pwd}            print current directory\n  {pushd} DIR      enter a directory and save the current one\n  {popd}           return to the last saved directory\n  {dirs}           show the directory stack\n  {history} [N|clear|QUERY]  list, trim, clear or search history\n  {status}         show the last exit status\n  {which} CMD      find a built-in, alias or executable\n  {path}           print PATH entries\n  {get} NAME       print one environment variable\n  {mkdir} DIR...   create directories\n  {mkcd} DIR       create a directory and enter it\n  {touch} FILE...  create files if needed\n  {open} PATH      open with the desktop default app\n  {set} NAME VALUE set an environment variable\n  {unset} NAME     remove an environment variable\n  {alias} [N[=V]]  list or define aliases\n  {unalias} NAME   remove aliases\n  {config}         show active UI / config knobs\n  {source} FILE    run a local opsh file\n  {repeat} N CMD   run a command N times\n  {time} CMD       run a command and show elapsed time\n  {clear}          clear the screen\n  {about}          show project information\n  {exit} [N]       leave opsh\n\n{}History: !! last command · !N entry N · Ctrl+R incremental search\nPrompt placeholders: {{mark}} {{cwd}} {{cwd:full}} {{git}} {{status}} {{elapsed}} {{stack}} {{prompt}}\nInteractive sessions load ~/.option/opsh/rc (or $OPSH_RC).\n&& || ; chains run inside opsh (so cd persists). Pipes and redirects use\n/bin/sh (or $OPSH_SHELL / a non-fish $SHELL), never fish built-ins.{}",
             self.paint(BOLD),
             self.ansi_reset(),
             self.paint(DIM),
@@ -868,7 +925,7 @@ impl Shell {
 
     fn banner(&self) {
         println!(
-            "{}◆ opsh{}  {}local shell{}\n  {}built-ins{}  cd · mkcd · which · source · help\n",
+            "{}◆ opsh{}  {}local shell{}\n  {}help{} · Ctrl+R search · Ctrl+D exit\n",
             self.paint(BOLD),
             self.ansi_reset(),
             self.paint(DIM),
@@ -921,6 +978,8 @@ impl Shell {
             "›".into()
         };
         let stack = self.stack_token(styled);
+        let git = self.git_token(styled);
+        let elapsed = self.elapsed_token(styled);
         let cwd_styled = if styled {
             format!("{}{cwd}{}", self.ansi_path(), self.ansi_reset())
         } else {
@@ -935,6 +994,8 @@ impl Shell {
         template
             .replace("{cwd:full}", &cwd_full_styled)
             .replace("{cwd}", &cwd_styled)
+            .replace("{git}", &git)
+            .replace("{elapsed}", &elapsed)
             .replace("{status}", &status)
             .replace("{mark}", &mark)
             .replace("{prompt}", &prompt)
@@ -950,6 +1011,36 @@ impl Shell {
             format!(" {}·{depth}{}", self.paint(DIM), self.ansi_reset())
         } else {
             format!(" ·{depth}")
+        }
+    }
+
+    fn git_token(&self, styled: bool) -> String {
+        let Some(branch) = git_branch_info() else {
+            return String::new();
+        };
+        let label = if branch.dirty {
+            format!("{}*", branch.name)
+        } else {
+            branch.name
+        };
+        if styled {
+            format!(" {}{label}{}", self.paint(DIM), self.ansi_reset())
+        } else {
+            format!(" {label}")
+        }
+    }
+
+    fn elapsed_token(&self, styled: bool) -> String {
+        let Some(elapsed) = self.last_elapsed else {
+            return String::new();
+        };
+        let Some(formatted) = format_elapsed(elapsed) else {
+            return String::new();
+        };
+        if styled {
+            format!(" {}{formatted}{}", self.paint(DIM), self.ansi_reset())
+        } else {
+            format!(" {formatted}")
         }
     }
 
@@ -1226,7 +1317,8 @@ fn rc_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
 
-    let canonical = env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".option").join("opsh").join("rc"))?;
+    let canonical = env::var_os("HOME")
+        .map(|dir| PathBuf::from(dir).join(".option").join("opsh").join("rc"))?;
 
     if !canonical.exists() {
         let legacy = env::var_os("XDG_CONFIG_HOME")
@@ -1257,9 +1349,125 @@ fn prompt_template() -> String {
         .to_ascii_lowercase()
         .as_str()
     {
-        "single" | "one" | "1" => "{mark} {cwd}{status}{stack} {prompt} ".into(),
-        _ => "{mark} {cwd}{status}{stack}\n{prompt} ".into(),
+        "single" | "one" | "1" => "{mark} {cwd}{git}{status}{elapsed}{stack} {prompt} ".into(),
+        _ => "{mark} {cwd}{git}{status}{elapsed}{stack}\n{prompt} ".into(),
     }
+}
+
+struct GitBranch {
+    name: String,
+    dirty: bool,
+}
+
+fn git_branch_info() -> Option<GitBranch> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8(output.stdout).ok()?;
+    let name = name.trim();
+    if name.is_empty() || name == "HEAD" {
+        return None;
+    }
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
+    Some(GitBranch {
+        name: name.to_owned(),
+        dirty,
+    })
+}
+
+/// Format elapsed time for the prompt. Returns `None` below 10ms to stay quiet.
+fn format_elapsed(elapsed: Duration) -> Option<String> {
+    let millis = elapsed.as_millis();
+    if millis < 10 {
+        return None;
+    }
+    if millis < 1_000 {
+        Some(format!("{millis}ms"))
+    } else {
+        Some(format!("{:.1}s", elapsed.as_secs_f64()))
+    }
+}
+
+/// Expand `!!` (last entry) and `!N` (1-based entry) outside single quotes.
+fn expand_history_refs(input: &str, entries: &[String]) -> Result<(String, bool), String> {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut at_word_start = true;
+    let mut changed = false;
+
+    while let Some(character) = chars.next() {
+        match character {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                output.push(character);
+                at_word_start = false;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                output.push(character);
+                at_word_start = false;
+            }
+            '!' if !in_single && at_word_start => match chars.peek().copied() {
+                Some('!') => {
+                    chars.next();
+                    let entry = entries
+                        .last()
+                        .ok_or_else(|| "!!: no history yet".to_owned())?;
+                    output.push_str(entry);
+                    changed = true;
+                    at_word_start = false;
+                }
+                Some(digit) if digit.is_ascii_digit() => {
+                    let mut number = String::new();
+                    while matches!(chars.peek(), Some(next) if next.is_ascii_digit()) {
+                        number.push(chars.next().expect("peeked digit"));
+                    }
+                    let index = number
+                        .parse::<usize>()
+                        .map_err(|_| format!("!{number}: invalid history index"))?;
+                    if index == 0 {
+                        return Err("!0: history indices start at 1".into());
+                    }
+                    let entry = entries.get(index - 1).ok_or_else(|| {
+                        format!("!{index}: history only has {} entries", entries.len())
+                    })?;
+                    output.push_str(entry);
+                    changed = true;
+                    at_word_start = false;
+                }
+                _ => {
+                    output.push('!');
+                    at_word_start = false;
+                }
+            },
+            character if character.is_whitespace() => {
+                output.push(character);
+                at_word_start = true;
+            }
+            _ => {
+                output.push(character);
+                at_word_start = false;
+            }
+        }
+    }
+
+    Ok((output, changed))
 }
 
 fn parse_color_value(value: &str) -> Option<String> {
@@ -1850,5 +2058,78 @@ mod tests {
         assert!(directory.join("nested-b").is_dir());
         env::set_current_dir(&original).unwrap();
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn expands_history_bang_refs() {
+        let entries = vec!["echo one".into(), "echo two".into(), "pwd".into()];
+        assert_eq!(
+            expand_history_refs("!!", &entries).unwrap(),
+            ("pwd".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("!1", &entries).unwrap(),
+            ("echo one".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("!2 && true", &entries).unwrap(),
+            ("echo two && true".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("echo '!!'", &entries).unwrap(),
+            ("echo '!!'".into(), false)
+        );
+        assert!(expand_history_refs("!!", &[]).is_err());
+        assert!(expand_history_refs("!9", &entries).is_err());
+        assert!(expand_history_refs("!0", &entries).is_err());
+    }
+
+    #[test]
+    fn history_lists_searches_and_clears() {
+        let directory = std::env::temp_dir().join(format!("opsh-hist-cmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("history");
+        let history = History {
+            path: path.clone(),
+            entries: vec!["echo alpha".into(), "echo beta".into(), "pwd".into()],
+        };
+        let mut shell = Shell::new(history);
+        assert_eq!(shell.history_cmd(&[]).unwrap().code(), 0);
+        assert_eq!(shell.history_cmd(&["1".into()]).unwrap().code(), 0);
+        assert_eq!(shell.history_cmd(&["beta".into()]).unwrap().code(), 0);
+        assert_eq!(shell.history_cmd(&["zzz".into()]).unwrap().code(), 1);
+        assert_eq!(shell.history_cmd(&["clear".into()]).unwrap().code(), 0);
+        assert!(shell.history.entries.is_empty());
+        assert!(shell.history_cleared);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn formats_elapsed_quietly() {
+        assert_eq!(format_elapsed(Duration::from_millis(9)), None);
+        assert_eq!(
+            format_elapsed(Duration::from_millis(42)),
+            Some("42ms".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(1500)),
+            Some("1.5s".into())
+        );
+    }
+
+    #[test]
+    fn default_prompt_includes_git_and_elapsed() {
+        unsafe {
+            env::remove_var("OPSH_PROMPT");
+            env::set_var("OPSH_PROMPT_STYLE", "single");
+        }
+        let template = prompt_template();
+        assert!(template.contains("{git}"));
+        assert!(template.contains("{elapsed}"));
+        unsafe {
+            env::remove_var("OPSH_PROMPT_STYLE");
+        }
     }
 }

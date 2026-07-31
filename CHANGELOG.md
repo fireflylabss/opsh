@@ -2,6 +2,19 @@
 
 All notable changes to opsh are documented here.
 
+## 0.1.8 — 2026-07-31
+
+### Added
+
+- Incremental history search with **Ctrl+R** (documented; powered by rustyline).
+- History expansion: `!!` (last command) and `!N` (entry N).
+- `history N`, `history clear`, and `history QUERY` for trim / clear / substring search.
+- Prompt placeholders `{git}` (branch, `*` when dirty) and `{elapsed}` (quiet below 10ms).
+
+### Changed
+
+- Default prompt templates now include `{git}` and `{elapsed}`.
+
 ## 0.1.7 — 2026-07-29
 
 ### Changed
