@@ -67,10 +67,17 @@ dependencies = [
 
 [[package]]
 name = "opsh"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
+ "optionSDK",
  "rustyline",
 ]
+
+[[package]]
+name = "optionSDK"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e08d7bef833f1ce6ea916624d0007f251cb14e5c37ff26d910cf72ce857bced2"
 
 [[package]]
 name = "proc-macro2"

@@ -4,6 +4,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use option_sdk::{App, migrate_file};
 use shell::{History, Shell};
 
 fn main() -> ExitCode {
@@ -47,33 +48,21 @@ fn run() -> Result<i32, String> {
     }
 }
 
-fn option_opsh_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".option").join("opsh"))
-}
-
 fn history_path() -> PathBuf {
     if let Some(path) = env::var_os("OPSH_HISTORY") {
         return PathBuf::from(path);
     }
 
-    let canonical = option_opsh_dir()
-        .map(|dir| dir.join("history"))
-        .unwrap_or_else(|| PathBuf::from(".opsh_history"));
+    let _ = App::OPSH.ensure();
+    let canonical = App::OPSH.path("history");
 
-    if !canonical.exists() {
-        let legacy = env::var_os("XDG_STATE_HOME")
-            .map(|dir| PathBuf::from(dir).join("opsh/history"))
-            .or_else(|| {
-                env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".local/state/opsh/history"))
-            });
-        if let Some(legacy) = legacy {
-            if legacy.exists() {
-                if let Some(parent) = canonical.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::rename(&legacy, &canonical);
-            }
-        }
+    let legacy = env::var_os("XDG_STATE_HOME")
+        .map(|dir| PathBuf::from(dir).join("opsh/history"))
+        .or_else(|| {
+            env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".local/state/opsh/history"))
+        });
+    if let Some(legacy) = legacy {
+        let _ = migrate_file(&legacy, &canonical);
     }
 
     canonical

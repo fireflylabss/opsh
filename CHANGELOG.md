@@ -2,6 +2,16 @@
 
 All notable changes to opsh are documented here.
 
+## 0.1.9 — 2026-08-02
+
+### Added
+
+- Depend on published **optionSDK** 0.1.2 for shared `~/.option/opsh/` paths, marks, and `NO_COLOR` helpers.
+
+### Changed
+
+- History and rc resolution go through `option_sdk::App::OPSH` (with the same legacy XDG migrate via `migrate_file`).
+
 ## 0.1.8 — 2026-07-31
 
 ### Added

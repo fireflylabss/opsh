@@ -202,7 +202,7 @@ impl Shell {
     pub fn with_options(history: History, quiet: bool) -> Self {
         let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
         let color = interactive
-            && env::var_os("NO_COLOR").is_none()
+            && option_sdk::color_enabled()
             && env::var("TERM").is_ok_and(|term| term != "dumb");
         Self {
             history,
@@ -1317,21 +1317,14 @@ fn rc_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
 
-    let canonical = env::var_os("HOME")
-        .map(|dir| PathBuf::from(dir).join(".option").join("opsh").join("rc"))?;
+    let _ = option_sdk::App::OPSH.ensure();
+    let canonical = option_sdk::App::OPSH.path("rc");
 
-    if !canonical.exists() {
-        let legacy = env::var_os("XDG_CONFIG_HOME")
-            .map(|dir| PathBuf::from(dir).join("opsh/rc"))
-            .or_else(|| env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".config/opsh/rc")));
-        if let Some(legacy) = legacy {
-            if legacy.exists() {
-                if let Some(parent) = canonical.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::rename(&legacy, &canonical);
-            }
-        }
+    let legacy = env::var_os("XDG_CONFIG_HOME")
+        .map(|dir| PathBuf::from(dir).join("opsh/rc"))
+        .or_else(|| env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".config/opsh/rc")));
+    if let Some(legacy) = legacy {
+        let _ = option_sdk::migrate_file(&legacy, &canonical);
     }
 
     Some(canonical)
