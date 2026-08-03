@@ -2,6 +2,13 @@
 
 All notable changes to opsh are documented here.
 
+## v0.1.10-stable · 03/08/2026
+
+Shared SDK 0.1.3 release alignment. This version was made for CLI with a stable release channel on 03/08/2026 (v0.1.10-stable).
+
+- Adopt the canonical `optionSDK` 0.1.3 contract for shared paths and atomic persistence helpers.
+- Keep the `opsh` binary and its existing local-first history/rc behavior unchanged.
+
 ## 0.1.9 — 2026-08-02
 
 ### Added

@@ -1,6 +1,6 @@
 [package]
 name = "opsh"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 rust-version = "1.85"
 description = "opsh — a small, local-first shell"
@@ -19,7 +19,7 @@ name = "opsh"
 path = "src/main.rs"
 
 [dependencies]
-optionSDK = "0.1.2"
+optionSDK = "0.1.3"
 rustyline = { version = "18", default-features = false, features = ["derive", "with-file-history"] }
 
 [profile.release]
