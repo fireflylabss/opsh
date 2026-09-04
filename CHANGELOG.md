@@ -2,6 +2,14 @@
 
 All notable changes to opsh are documented here.
 
+## v0.1.11-stable · 04/09/2026
+
+`doctor` command, family SDK path, and agent docs. This version was made for CLI with a stable release channel on 04/09/2026 (v0.1.11-stable).
+
+- New `opsh doctor [--json]`: checks `~/.option/opsh` state dir, `history`/`rc` paths, and the POSIX shell (`$OPSH_SHELL` / `$SHELL` / `/bin/sh`).
+- Depend on `optionSDK` via the local family path (`../optionSDK`) instead of crates.io only, matching `optionUtils`.
+- Add `VERSIONING.md` (single CLI surface) and `AGENTS.md` (build/test/install checklist).
+
 ## v0.1.10-stable · 03/08/2026
 
 Shared SDK 0.1.3 release alignment. This version was made for CLI with a stable release channel on 03/08/2026 (v0.1.10-stable).
