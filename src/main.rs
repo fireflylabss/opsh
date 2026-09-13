@@ -1,11 +1,17 @@
+mod builtins;
+mod completion;
+mod history;
+mod parser;
+mod prompt;
 mod shell;
 
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use history::History;
 use option_sdk::{App, migrate_file};
-use shell::{History, Shell};
+use shell::Shell;
 
 fn main() -> ExitCode {
     match run() {
