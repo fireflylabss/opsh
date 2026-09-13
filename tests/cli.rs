@@ -386,34 +386,127 @@ fn doctor_json_has_expected_shape() {
         .unwrap();
     assert_eq!(code(&output), 0);
     let json = stdout(&output);
-    let json = json.trim_end();
-    assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
-    assert_eq!(json.lines().count(), 1);
+    assert_eq!(json.lines().count(), 1, "{json}");
+    let fields = parse_flat_json_object(json.trim_end())
+        .unwrap_or_else(|error| panic!("doctor --json produced invalid JSON ({error}): {json}"));
 
-    for key in [
-        "\"state_dir\":\"",
-        "\"state_ok\":",
-        "\"history\":\"",
-        "\"rc\":\"",
-        "\"shell\":\"",
-        "\"shell_ok\":",
-    ] {
-        assert!(json.contains(key), "missing {key} in {json}");
+    let keys: Vec<&str> = fields.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "state_dir",
+            "state_ok",
+            "history",
+            "rc",
+            "shell",
+            "shell_ok"
+        ]
+    );
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value)
+            .unwrap()
+    };
+    assert!(matches!(field("state_dir"), JsonValue::String(_)));
+    assert_eq!(field("state_ok"), &JsonValue::Bool(true));
+    assert_eq!(
+        field("history"),
+        &JsonValue::String(sandbox.path("history").display().to_string())
+    );
+    assert_eq!(
+        field("rc"),
+        &JsonValue::String(sandbox.path("rc").display().to_string())
+    );
+    assert_eq!(field("shell"), &JsonValue::String("/bin/sh".into()));
+    assert_eq!(field("shell_ok"), &JsonValue::Bool(true));
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum JsonValue {
+    String(String),
+    Bool(bool),
+}
+
+/// Strict parser for a single-line flat JSON object of string/bool values.
+fn parse_flat_json_object(input: &str) -> Result<Vec<(String, JsonValue)>, String> {
+    let mut chars = input.chars().peekable();
+    let mut fields = Vec::new();
+
+    fn parse_string(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    ) -> Result<String, String> {
+        if chars.next() != Some('"') {
+            return Err("expected opening quote".into());
+        }
+        let mut value = String::new();
+        loop {
+            match chars.next() {
+                None => return Err("unterminated string".into()),
+                Some('"') => return Ok(value),
+                Some('\\') => match chars.next() {
+                    Some('"') => value.push('"'),
+                    Some('\\') => value.push('\\'),
+                    Some('/') => value.push('/'),
+                    Some('n') => value.push('\n'),
+                    Some('t') => value.push('\t'),
+                    Some('r') => value.push('\r'),
+                    Some('b') => value.push('\u{8}'),
+                    Some('f') => value.push('\u{c}'),
+                    Some('u') => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        let code = u32::from_str_radix(&hex, 16)
+                            .map_err(|_| format!("bad \\u escape: {hex:?}"))?;
+                        value.push(char::from_u32(code).ok_or("bad \\u code point")?);
+                    }
+                    other => return Err(format!("bad escape: {other:?}")),
+                },
+                Some(control) if (control as u32) < 0x20 => {
+                    return Err(format!("unescaped control character {control:?}"));
+                }
+                Some(character) => value.push(character),
+            }
+        }
     }
-    assert!(json.contains("\"state_ok\":true"), "{json}");
-    assert!(json.contains("\"shell\":\"/bin/sh\""), "{json}");
-    assert!(json.contains("\"shell_ok\":true"), "{json}");
-    assert!(
-        json.contains(&format!(
-            "\"history\":\"{}\"",
-            sandbox.path("history").display()
-        )),
-        "{json}"
-    );
-    assert!(
-        json.contains(&format!("\"rc\":\"{}\"", sandbox.path("rc").display())),
-        "{json}"
-    );
+
+    if chars.next() != Some('{') {
+        return Err("expected '{'".into());
+    }
+    loop {
+        let key = parse_string(&mut chars)?;
+        if chars.next() != Some(':') {
+            return Err(format!("expected ':' after key {key:?}"));
+        }
+        let value = match chars.peek() {
+            Some('"') => JsonValue::String(parse_string(&mut chars)?),
+            Some('t') => {
+                let word: String = chars.by_ref().take(4).collect();
+                if word != "true" {
+                    return Err(format!("bad literal {word:?}"));
+                }
+                JsonValue::Bool(true)
+            }
+            Some('f') => {
+                let word: String = chars.by_ref().take(5).collect();
+                if word != "false" {
+                    return Err(format!("bad literal {word:?}"));
+                }
+                JsonValue::Bool(false)
+            }
+            other => return Err(format!("unsupported value start {other:?} for {key:?}")),
+        };
+        fields.push((key, value));
+        match chars.next() {
+            Some(',') => continue,
+            Some('}') => break,
+            other => return Err(format!("expected ',' or '}}', got {other:?}")),
+        }
+    }
+    if chars.next().is_some() {
+        return Err("trailing characters after object".into());
+    }
+    Ok(fields)
 }
 
 #[test]
