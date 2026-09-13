@@ -2286,4 +2286,411 @@ mod tests {
             env::remove_var("OPSH_PROMPT_STYLE");
         }
     }
+
+    fn test_shell(label: &str) -> Shell {
+        let history = History {
+            path: std::env::temp_dir().join(format!("opsh-{label}-{}", std::process::id())),
+            entries: Vec::new(),
+        };
+        Shell::new(history)
+    }
+
+    #[test]
+    fn history_refs_expand_only_at_word_start() {
+        let entries = vec!["echo one".into(), "echo two".into()];
+        assert_eq!(
+            expand_history_refs("echo !!", &entries).unwrap(),
+            ("echo echo two".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("  !1  ", &entries).unwrap(),
+            ("  echo one  ".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("a!!", &entries).unwrap(),
+            ("a!!".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo hello!", &entries).unwrap(),
+            ("echo hello!".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo ! !", &entries).unwrap(),
+            ("echo ! !".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("!1 && !2", &entries).unwrap(),
+            ("echo one && echo two".into(), true)
+        );
+    }
+
+    #[test]
+    fn history_refs_respect_quotes() {
+        let entries = vec!["pwd".into()];
+        assert_eq!(
+            expand_history_refs("echo '!1'", &entries).unwrap(),
+            ("echo '!1'".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo \"!!\"", &entries).unwrap(),
+            ("echo \"!!\"".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo \" !!\"", &entries).unwrap(),
+            ("echo \" pwd\"".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("echo 'x' !!", &entries).unwrap(),
+            ("echo 'x' pwd".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("echo \\!!", &entries).unwrap(),
+            ("echo \\!!".into(), false)
+        );
+    }
+
+    #[test]
+    fn history_refs_report_invalid_indices() {
+        let entries = vec!["one".into(), "two".into()];
+        assert_eq!(
+            expand_history_refs("!2", &entries).unwrap(),
+            ("two".into(), true)
+        );
+        let error = expand_history_refs("!3", &entries).unwrap_err();
+        assert!(error.contains("!3"), "{error}");
+        assert!(error.contains("2 entries"), "{error}");
+        let error = expand_history_refs("!0", &entries).unwrap_err();
+        assert!(error.contains("start at 1"), "{error}");
+        let error = expand_history_refs("!!", &[]).unwrap_err();
+        assert!(error.contains("no history yet"), "{error}");
+        let error = expand_history_refs("!99999999999999999999999", &entries).unwrap_err();
+        assert!(error.contains("invalid history index"), "{error}");
+        assert_eq!(
+            expand_history_refs("!01", &entries).unwrap(),
+            ("one".into(), true)
+        );
+    }
+
+    #[test]
+    fn splits_chains_on_operators() {
+        let (segments, operators) = split_chain("cd /tmp && ls || echo no; pwd").unwrap();
+        assert_eq!(segments, vec!["cd /tmp", "ls", "echo no", "pwd"]);
+        assert_eq!(operators, vec![ChainOp::And, ChainOp::Or, ChainOp::Seq]);
+
+        let (segments, operators) = split_chain("just one").unwrap();
+        assert_eq!(segments, vec!["just one"]);
+        assert!(operators.is_empty());
+
+        let (segments, operators) = split_chain("  a  ;  b  ").unwrap();
+        assert_eq!(segments, vec!["a", "b"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+    }
+
+    #[test]
+    fn split_chain_keeps_quoted_operators_intact() {
+        let (segments, operators) = split_chain("echo 'a && b' && echo \"c; d\"").unwrap();
+        assert_eq!(segments, vec!["echo 'a && b'", "echo \"c; d\""]);
+        assert_eq!(operators, vec![ChainOp::And]);
+
+        let (segments, operators) = split_chain("echo \"it's\"; echo done").unwrap();
+        assert_eq!(segments, vec!["echo \"it's\"", "echo done"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+    }
+
+    #[test]
+    fn split_chain_keeps_escaped_operators_intact() {
+        let (segments, operators) = split_chain(r"echo a\;b; echo c").unwrap();
+        assert_eq!(segments, vec![r"echo a\;b", "echo c"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+
+        let (segments, operators) = split_chain(r"echo a \&& b").unwrap();
+        assert_eq!(segments, vec![r"echo a \&& b"]);
+        assert!(operators.is_empty());
+
+        let (segments, operators) = split_chain(r"echo a \|| b").unwrap();
+        assert_eq!(segments, vec![r"echo a \|| b"]);
+        assert!(operators.is_empty());
+
+        let (segments, _) = split_chain(r"echo 'a\'; echo b").unwrap();
+        assert_eq!(segments, vec![r"echo 'a\'", "echo b"]);
+    }
+
+    #[test]
+    fn split_chain_rejects_malformed_input() {
+        assert_eq!(
+            split_chain("echo a &&").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(
+            split_chain("&& echo a").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(
+            split_chain("echo a; ; echo b").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(split_chain("echo 'a && b").unwrap_err(), "unclosed quote");
+        assert_eq!(split_chain("echo \"a; b").unwrap_err(), "unclosed quote");
+    }
+
+    #[test]
+    fn scan_operators_detects_each_kind() {
+        assert!(has_chain_operators("a && b"));
+        assert!(has_chain_operators("a || b"));
+        assert!(has_chain_operators("a; b"));
+        assert!(!has_chain_operators("a | b"));
+        assert!(!has_chain_operators("a &"));
+
+        assert!(needs_posix_shell("a | b"));
+        assert!(needs_posix_shell("a > out"));
+        assert!(needs_posix_shell("a >> out"));
+        assert!(needs_posix_shell("a < in"));
+        assert!(needs_posix_shell("a 2>&1"));
+        assert!(needs_posix_shell("echo `date`"));
+        assert!(needs_posix_shell("echo $(date)"));
+        assert!(needs_posix_shell("(cd /tmp && ls)"));
+        assert!(needs_posix_shell("sleep 1 &"));
+        assert!(needs_posix_shell("sleep 1 & echo"));
+        assert!(needs_posix_shell("& echo"));
+        assert!(!needs_posix_shell("a && b || c; d"));
+        assert!(!needs_posix_shell("echo $HOME"));
+        assert!(!needs_posix_shell("set X a&b"));
+    }
+
+    #[test]
+    fn scan_operators_ignores_quoted_and_escaped_operators() {
+        assert!(!needs_posix_shell("echo 'a | b'"));
+        assert!(!needs_posix_shell("echo \"a > b\""));
+        assert!(!needs_posix_shell("echo '$(date)'"));
+        assert!(!needs_posix_shell("echo \"(x)\""));
+        assert!(!needs_posix_shell("echo '`x`'"));
+        assert!(!needs_posix_shell("echo 'sleep &'"));
+        assert!(!needs_posix_shell(r"echo a\|b"));
+        assert!(!needs_posix_shell(r"echo a \> b"));
+        assert!(!needs_posix_shell(r"echo \(x\)"));
+        assert!(!needs_posix_shell(r"echo \$x"));
+        assert!(!has_chain_operators("echo 'a; b'"));
+        assert!(!has_chain_operators("echo \"a || b\""));
+        assert!(!has_chain_operators(r"echo a\;b"));
+        assert!(!has_chain_operators(r"echo a \&& b"));
+        assert!(!has_chain_operators("echo \"it's; fine\""));
+        assert!(needs_posix_shell("echo 'a' | wc"));
+        assert!(has_chain_operators("echo 'a' && echo b"));
+    }
+
+    #[test]
+    fn renders_prompt_placeholders_raw() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let mut shell = test_shell("prompt-raw");
+        let cwd = env::current_dir().unwrap();
+
+        assert_eq!(
+            shell.render_prompt("{cwd:full}", false),
+            cwd.display().to_string()
+        );
+        assert_eq!(
+            shell.render_prompt("{cwd}", false),
+            compact_path(&cwd).unwrap()
+        );
+        assert_eq!(shell.render_prompt("{mark}{prompt}", false), "◆›");
+        assert_eq!(shell.render_prompt("[{status}]", false), "[]");
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[]");
+        assert_eq!(shell.render_prompt("[{stack}]", false), "[]");
+        assert_eq!(shell.render_prompt("plain text", false), "plain text");
+        assert_eq!(shell.render_prompt("{unknown}", false), "{unknown}");
+
+        shell.last_status = 42;
+        assert_eq!(shell.render_prompt("[{status}]", false), "[ ×42]");
+
+        shell.last_elapsed = Some(Duration::from_millis(250));
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[ 250ms]");
+        shell.last_elapsed = Some(Duration::from_millis(3));
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[]");
+
+        shell.directory_stack.push(cwd.clone());
+        shell.directory_stack.push(cwd.clone());
+        assert_eq!(shell.render_prompt("[{stack}]", false), "[ ·2]");
+
+        assert_eq!(
+            shell.render_prompt("{mark}{status}{stack} {prompt} ", false),
+            "◆ ×42 ·2 › "
+        );
+    }
+
+    #[test]
+    fn styled_prompt_matches_raw_without_color() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let mut shell = test_shell("prompt-styled");
+        shell.color = false;
+        shell.last_status = 2;
+        shell.last_elapsed = Some(Duration::from_millis(1200));
+        let template = "{mark} {cwd}{status}{elapsed}{stack} {prompt} ";
+        assert_eq!(
+            shell.render_prompt(template, true),
+            shell.render_prompt(template, false)
+        );
+    }
+
+    #[test]
+    fn styled_prompt_wraps_placeholders_in_color() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        unsafe {
+            env::remove_var("OPSH_COLOR_OK");
+            env::remove_var("OPSH_COLOR_ERR");
+            env::remove_var("OPSH_COLOR_PATH");
+            env::remove_var("OPSH_COLOR_MARK");
+        }
+        let mut shell = test_shell("prompt-color");
+        shell.color = true;
+        assert_eq!(
+            shell.render_prompt("{mark}", true),
+            format!("{GREEN}◆{RESET}")
+        );
+        assert_eq!(
+            shell.render_prompt("{prompt}", true),
+            format!("{YELLOW}›{RESET}")
+        );
+        shell.last_status = 7;
+        assert_eq!(
+            shell.render_prompt("{mark}{status}", true),
+            format!("{RED}◆{RESET} {RED}×7{RESET}")
+        );
+        let cwd = env::current_dir().unwrap();
+        assert_eq!(
+            shell.render_prompt("{cwd:full}", true),
+            format!("{BLUE}{}{RESET}", cwd.display())
+        );
+    }
+
+    #[test]
+    fn format_elapsed_boundaries() {
+        assert_eq!(format_elapsed(Duration::ZERO), None);
+        assert_eq!(format_elapsed(Duration::from_millis(9)), None);
+        assert_eq!(
+            format_elapsed(Duration::from_millis(10)),
+            Some("10ms".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(999)),
+            Some("999ms".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(1000)),
+            Some("1.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(1049)),
+            Some("1.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(2550)),
+            Some("2.5s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_secs(90)),
+            Some("90.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_micros(10_499)),
+            Some("10ms".into())
+        );
+    }
+
+    #[test]
+    fn parse_color_value_handles_disabling_keywords() {
+        for value in [
+            "", "   ", "0", "off", "OFF", "false", "False", "no", "none", " none ",
+        ] {
+            assert_eq!(parse_color_value(value), Some(String::new()), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn parse_color_value_handles_sgr_and_escapes() {
+        assert_eq!(parse_color_value("31"), Some("\x1b[31m".into()));
+        assert_eq!(parse_color_value("1;31"), Some("\x1b[1;31m".into()));
+        assert_eq!(
+            parse_color_value("  38;5;75  "),
+            Some("\x1b[38;5;75m".into())
+        );
+        assert_eq!(parse_color_value("\x1b[1;32m"), Some("\x1b[1;32m".into()));
+        assert_eq!(parse_color_value("\\x1b[35m"), Some("\x1b[35m".into()));
+        assert_eq!(parse_color_value("  \\x1b[35m  "), Some("\x1b[35m".into()));
+    }
+
+    #[test]
+    fn parse_color_value_rejects_garbage() {
+        assert_eq!(parse_color_value("red"), None);
+        assert_eq!(parse_color_value("38;5;x"), None);
+        assert_eq!(parse_color_value("#ff0000"), None);
+        assert_eq!(parse_color_value("[31m"), None);
+        assert_eq!(parse_color_value("1 31"), None);
+        assert_eq!(parse_color_value("true"), None);
+    }
+
+    #[test]
+    fn shell_quote_leaves_safe_values_bare() {
+        assert_eq!(shell_quote("ls"), "ls");
+        assert_eq!(shell_quote("ls-la_v2"), "ls-la_v2");
+        assert_eq!(shell_quote("/usr/bin/env"), "/usr/bin/env");
+        assert_eq!(shell_quote("a.b:c=d"), "a.b:c=d");
+        assert_eq!(shell_quote("ABC123"), "ABC123");
+    }
+
+    #[test]
+    fn shell_quote_wraps_unsafe_values() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("ls -la"), "'ls -la'");
+        assert_eq!(shell_quote("a|b"), "'a|b'");
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+        assert_eq!(shell_quote("a\"b"), "'a\"b'");
+        assert_eq!(shell_quote("a\\b"), "'a\\b'");
+        assert_eq!(shell_quote("*"), "'*'");
+        assert_eq!(shell_quote("tab\there"), "'tab\there'");
+        assert_eq!(shell_quote("ünïcode"), "'ünïcode'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote("'"), r"''\'''");
+        assert_eq!(shell_quote("a'b'c"), r"'a'\''b'\''c'");
+    }
+
+    #[test]
+    fn shell_quote_round_trips_through_split_words() {
+        for value in [
+            "plain",
+            "with space",
+            "it's",
+            "a'b'c",
+            "$HOME and `cmd`",
+            "quote\"inside",
+            "back\\slash",
+            "semi;colon && and",
+        ] {
+            let quoted = shell_quote(value);
+            let words = split_words(&format!("echo {quoted}")).unwrap();
+            assert_eq!(
+                words,
+                vec!["echo".to_owned(), value.to_owned()],
+                "{value:?}"
+            );
+        }
+    }
+
+    // Known gap: `split_words` drops empty quoted words (`''` / `""`), so an
+    // argument that is intentionally empty disappears instead of being passed on.
+    #[test]
+    #[ignore]
+    fn split_words_keeps_empty_quoted_arguments() {
+        assert_eq!(
+            split_words("echo ''").unwrap(),
+            vec!["echo".to_owned(), String::new()]
+        );
+        assert_eq!(
+            split_words(r#"set NAME """#).unwrap(),
+            vec!["set".to_owned(), "NAME".to_owned(), String::new()]
+        );
+    }
 }
