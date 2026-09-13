@@ -6,6 +6,7 @@ All notable changes to opsh are documented here.
 
 - `{git}` prompt token: the dirty check now runs `git status --porcelain --untracked-files=no` (tracked files only) and can be skipped entirely with `OPSH_GIT_DIRTY=0`; shown as `git_dirty` in `config`.
 - `$OPSH_SHELL` / `$SHELL` are validated (absolute path must be an executable file, bare names must resolve in `PATH`); an invalid value prints one warning per session and falls back to `/bin/sh`. Fish is still never used.
+- Ctrl+C while an external command runs no longer kills opsh: `SIGINT` is ignored in the shell while a foreground child runs (the child gets the default handler back), the child's death is reported as status 130 (`128 + signal` in general), and the REPL prints a fresh prompt. Ctrl+C at the prompt keeps its existing behaviour (`^C`, status 130) and also survives non-raw terminals such as `TERM=dumb`.
 
 ## v0.1.11-stable · 04/09/2026
 

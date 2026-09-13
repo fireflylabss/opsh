@@ -271,6 +271,11 @@ impl Shell {
         for entry in &self.history.entries {
             let _ = editor.add_history_entry(entry.as_str());
         }
+        // Ctrl+C must never end the session: in raw mode rustyline reports it as
+        // `Interrupted`, and when the terminal is not raw (`TERM=dumb`) the
+        // signal would otherwise kill opsh. Children get `SIGINT` back on exec.
+        #[cfg(unix)]
+        let _sigint = sigint::Ignored::new();
 
         loop {
             let (raw, styled) = self.prompt_pair();
@@ -691,11 +696,9 @@ impl Shell {
         } else {
             "xdg-open"
         };
-        let status = Command::new(opener)
-            .arg(&path)
-            .status()
+        let status = run_foreground(Command::new(opener).arg(&path))
             .map_err(|error| format!("open: {opener}: {error}"))?;
-        Ok(Flow::Continue(status.code().unwrap_or(1)))
+        Ok(Flow::Continue(status))
     }
 
     fn set(&self, words: &[String]) -> Result<Flow, String> {
@@ -912,12 +915,9 @@ impl Shell {
 
     fn external(&self, command: &str) -> Result<Flow, String> {
         let shell = command_shell();
-        let status = Command::new(&shell)
-            .arg("-c")
-            .arg(command)
-            .status()
+        let status = run_foreground(Command::new(&shell).arg("-c").arg(command))
             .map_err(|error| format!("could not run command: {error}"))?;
-        Ok(Flow::Continue(status.code().unwrap_or(1)))
+        Ok(Flow::Continue(status))
     }
 
     fn banner(&self) {
@@ -1401,6 +1401,80 @@ fn is_truthy_env(value: &str) -> bool {
     )
 }
 
+/// Run a child in the foreground and wait for it. `SIGINT` is ignored in opsh
+/// while the child runs so Ctrl+C reaches only the child; the child itself
+/// gets the default disposition back before `exec`. A signal-killed child
+/// reports `128 + signal` (130 for Ctrl+C), like POSIX shells.
+fn run_foreground(command: &mut Command) -> io::Result<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let _guard = sigint::Ignored::new();
+        // SAFETY: only async-signal-safe `signal(2)` runs between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                sigint::set_default();
+                Ok(())
+            });
+        }
+        let status = command.status()?;
+        Ok(exit_code_from(status.code(), status.signal()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status()?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+fn exit_code_from(code: Option<i32>, signal: Option<i32>) -> i32 {
+    match (code, signal) {
+        (Some(code), _) => code,
+        (None, Some(signal)) => 128 + signal,
+        (None, None) => 1,
+    }
+}
+
+#[cfg(unix)]
+mod sigint {
+    use std::ffi::c_int;
+
+    const SIGINT: c_int = 2;
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+
+    unsafe extern "C" {
+        fn signal(signum: c_int, handler: usize) -> usize;
+    }
+
+    /// Ignores `SIGINT` for the lifetime of the guard, then restores the
+    /// previous disposition.
+    pub struct Ignored {
+        previous: usize,
+    }
+
+    impl Ignored {
+        pub fn new() -> Self {
+            // SAFETY: `signal` is a plain libc call with a constant handler value.
+            let previous = unsafe { signal(SIGINT, SIG_IGN) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for Ignored {
+        fn drop(&mut self) {
+            // SAFETY: restores the disposition captured in `new`.
+            unsafe { signal(SIGINT, self.previous) };
+        }
+    }
+
+    pub fn set_default() {
+        // SAFETY: `signal` is async-signal-safe; called between fork and exec.
+        unsafe { signal(SIGINT, SIG_DFL) };
+    }
+}
+
 /// Format elapsed time for the prompt. Returns `None` below 10ms to stay quiet.
 fn format_elapsed(elapsed: Duration) -> Option<String> {
     let millis = elapsed.as_millis();
@@ -1880,6 +1954,28 @@ mod tests {
         assert!(!is_fish_shell("/bin/bash"));
         assert!(!is_fish_shell("/bin/sh"));
         assert!(!is_fish_shell("/usr/bin/zsh"));
+    }
+
+    #[test]
+    fn maps_child_exit_status_like_posix() {
+        assert_eq!(exit_code_from(Some(0), None), 0);
+        assert_eq!(exit_code_from(Some(3), None), 3);
+        assert_eq!(exit_code_from(None, Some(2)), 130);
+        assert_eq!(exit_code_from(None, Some(9)), 137);
+        assert_eq!(exit_code_from(None, None), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_child_yields_130_and_shell_survives() {
+        let code = run_foreground(Command::new("/bin/sh").args(["-c", "kill -INT $$"]))
+            .expect("child should spawn");
+        assert_eq!(code, 130);
+        // opsh itself must still be alive with SIGINT handling restored
+        assert_eq!(
+            run_foreground(Command::new("/bin/sh").args(["-c", "exit 7"])).unwrap(),
+            7
+        );
     }
 
     #[test]
