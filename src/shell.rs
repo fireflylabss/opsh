@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,8 @@ use rustyline::hint::HistoryHinter;
 use rustyline::{Config, Context, Editor, Helper, Hinter, Validator};
 
 const MAX_HISTORY: usize = 1_000;
+const DEFAULT_SHELL: &str = "/bin/sh";
+static SHELL_WARNED: AtomicBool = AtomicBool::new(false);
 const MAX_SOURCE_DEPTH: usize = 32;
 
 const BUILTINS: &[&str] = &[
@@ -1531,12 +1534,36 @@ fn shell_quote(value: &str) -> String {
 /// POSIX syntax go through `/bin/sh`, unless `OPSH_SHELL` or a non-fish `$SHELL`
 /// is set.
 fn command_shell() -> String {
-    if let Ok(shell) = env::var("OPSH_SHELL") {
-        return shell;
+    let (source, candidate) = match env::var("OPSH_SHELL") {
+        Ok(shell) => ("OPSH_SHELL", shell),
+        Err(_) => match env::var("SHELL") {
+            Ok(shell) if !is_fish_shell(&shell) => ("SHELL", shell),
+            _ => return DEFAULT_SHELL.into(),
+        },
+    };
+    if shell_is_usable(&candidate) {
+        return candidate;
     }
-    match env::var("SHELL") {
-        Ok(shell) if !is_fish_shell(&shell) => shell,
-        _ => "/bin/sh".into(),
+    if !SHELL_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "opsh: ${source}={candidate:?} is not an executable shell; using {DEFAULT_SHELL}"
+        );
+    }
+    DEFAULT_SHELL.into()
+}
+
+/// Absolute paths must point at an executable file; bare names must resolve
+/// through `PATH`.
+fn shell_is_usable(shell: &str) -> bool {
+    let trimmed = shell.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() || trimmed.contains('/') {
+        is_executable(path)
+    } else {
+        find_in_path(trimmed).is_some()
     }
 }
 
@@ -1853,6 +1880,17 @@ mod tests {
         assert!(!is_fish_shell("/bin/bash"));
         assert!(!is_fish_shell("/bin/sh"));
         assert!(!is_fish_shell("/usr/bin/zsh"));
+    }
+
+    #[test]
+    fn validates_command_shell_candidates() {
+        assert!(shell_is_usable("/bin/sh"));
+        assert!(shell_is_usable("sh"));
+        assert!(!shell_is_usable(""));
+        assert!(!shell_is_usable("   "));
+        assert!(!shell_is_usable("/nonexistent/opsh-shell"));
+        assert!(!shell_is_usable("definitely-not-a-shell-binary-opsh"));
+        assert!(!shell_is_usable("/etc/hostname"));
     }
 
     #[test]
