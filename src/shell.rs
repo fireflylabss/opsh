@@ -237,13 +237,7 @@ impl Shell {
         if self.quiet {
             return false;
         }
-        match env::var("OPSH_BANNER") {
-            Ok(value) => !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
-            ),
-            Err(_) => true,
-        }
+        env::var("OPSH_BANNER").map_or(true, |value| is_truthy_env(&value))
     }
 
     fn load_rc(&mut self) -> Result<(), String> {
@@ -1080,6 +1074,15 @@ impl Shell {
                 "color.accent",
                 env::var("OPSH_COLOR_ACCENT").unwrap_or_else(|_| "38;5;183".into()),
             ),
+            (
+                "git_dirty",
+                if git_dirty_check_enabled() {
+                    "on"
+                } else {
+                    "off"
+                }
+                .to_owned(),
+            ),
             ("shell", command_shell()),
             ("history", self.history.path.display().to_string()),
             (
@@ -1368,18 +1371,31 @@ fn git_branch_info() -> Option<GitBranch> {
     if name.is_empty() || name == "HEAD" {
         return None;
     }
-    let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
+    let dirty = git_dirty_check_enabled()
+        && Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
     Some(GitBranch {
         name: name.to_owned(),
         dirty,
     })
+}
+
+/// `OPSH_GIT_DIRTY=0` skips the `git status` dirty marker in `{git}`.
+fn git_dirty_check_enabled() -> bool {
+    env::var("OPSH_GIT_DIRTY").map_or(true, |value| is_truthy_env(&value))
+}
+
+fn is_truthy_env(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
 }
 
 /// Format elapsed time for the prompt. Returns `None` below 10ms to stay quiet.
@@ -1816,6 +1832,17 @@ mod tests {
         assert_eq!(command_tail("repeat 3 echo hello", 1), Some("3 echo hello"));
         assert_eq!(command_tail(r#"time echo "a b""#, 1), Some(r#"echo "a b""#));
         assert_eq!(command_tail("repeat", 2), None);
+    }
+
+    #[test]
+    fn parses_truthy_env_values() {
+        assert!(is_truthy_env("1"));
+        assert!(is_truthy_env("on"));
+        assert!(is_truthy_env(""));
+        assert!(!is_truthy_env("0"));
+        assert!(!is_truthy_env(" OFF "));
+        assert!(!is_truthy_env("false"));
+        assert!(!is_truthy_env("no"));
     }
 
     #[test]

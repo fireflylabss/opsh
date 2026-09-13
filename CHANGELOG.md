@@ -2,6 +2,10 @@
 
 All notable changes to opsh are documented here.
 
+## Unreleased
+
+- `{git}` prompt token: the dirty check now runs `git status --porcelain --untracked-files=no` (tracked files only) and can be skipped entirely with `OPSH_GIT_DIRTY=0`; shown as `git_dirty` in `config`.
+
 ## v0.1.11-stable · 04/09/2026
 
 `doctor` command, family SDK path, and agent docs. This version was made for CLI with a stable release channel on 04/09/2026 (v0.1.11-stable).
