@@ -405,11 +405,31 @@ mod tests {
     #[test]
     fn styled_prompt_wraps_placeholders_in_color() {
         let _guard = CWD_LOCK.lock().unwrap();
-        unsafe {
-            env::remove_var("OPSH_COLOR_OK");
-            env::remove_var("OPSH_COLOR_ERR");
-            env::remove_var("OPSH_COLOR_PATH");
-            env::remove_var("OPSH_COLOR_MARK");
+        const COLOR_KEYS: [&str; 4] = [
+            "OPSH_COLOR_OK",
+            "OPSH_COLOR_ERR",
+            "OPSH_COLOR_PATH",
+            "OPSH_COLOR_MARK",
+        ];
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (key, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => unsafe { env::set_var(key, value) },
+                        None => unsafe { env::remove_var(key) },
+                    }
+                }
+            }
+        }
+        let _restore = RestoreEnv(
+            COLOR_KEYS
+                .iter()
+                .map(|key| (*key, env::var_os(key)))
+                .collect(),
+        );
+        for key in COLOR_KEYS {
+            unsafe { env::remove_var(key) };
         }
         let mut shell = test_shell("prompt-color");
         shell.color = true;
