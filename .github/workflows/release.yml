@@ -37,7 +37,7 @@ jobs:
     needs: resolve
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
@@ -79,12 +79,12 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve.outputs.tag }}
           path: opsh
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: fireflylabss/optionSDK
           path: optionSDK
