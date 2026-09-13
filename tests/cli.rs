@@ -423,6 +423,27 @@ fn doctor_json_has_expected_shape() {
     assert_eq!(field("shell_ok"), &JsonValue::Bool(true));
 }
 
+// Known gap: `cmd_doctor` interpolates paths into the JSON output without
+// escaping, so a path containing `"` or `\` yields invalid JSON.
+#[test]
+#[ignore]
+fn doctor_json_escapes_special_characters_in_paths() {
+    let sandbox = Sandbox::new("doctor-escape");
+    let rc = sandbox.path(r#"quote"back\slash"#);
+    let output = sandbox
+        .command()
+        .env("OPSH_RC", &rc)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0);
+    let json = stdout(&output);
+    let fields = parse_flat_json_object(json.trim_end())
+        .unwrap_or_else(|error| panic!("doctor --json produced invalid JSON ({error}): {json}"));
+    let rc_field = fields.iter().find(|(key, _)| key == "rc").map(|(_, v)| v);
+    assert_eq!(rc_field, Some(&JsonValue::String(rc.display().to_string())));
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum JsonValue {
     String(String),

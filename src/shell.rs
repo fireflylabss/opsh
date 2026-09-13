@@ -2540,7 +2540,23 @@ mod tests {
             "OPSH_COLOR_PATH",
             "OPSH_COLOR_MARK",
         ];
-        let saved: Vec<Option<std::ffi::OsString>> = COLOR_KEYS.iter().map(env::var_os).collect();
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (key, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => unsafe { env::set_var(key, value) },
+                        None => unsafe { env::remove_var(key) },
+                    }
+                }
+            }
+        }
+        let _restore = RestoreEnv(
+            COLOR_KEYS
+                .iter()
+                .map(|key| (*key, env::var_os(key)))
+                .collect(),
+        );
         for key in COLOR_KEYS {
             unsafe { env::remove_var(key) };
         }
@@ -2564,12 +2580,6 @@ mod tests {
             shell.render_prompt("{cwd:full}", true),
             format!("{BLUE}{}{RESET}", cwd.display())
         );
-        for (key, value) in COLOR_KEYS.iter().zip(saved) {
-            match value {
-                Some(value) => unsafe { env::set_var(key, value) },
-                None => unsafe { env::remove_var(key) },
-            }
-        }
     }
 
     #[test]
