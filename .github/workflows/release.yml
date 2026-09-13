@@ -58,7 +58,7 @@ jobs:
           commit_message: Update to ${{ needs.resolve.outputs.version }}
 
       - name: Open PR with packaging bump
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           base: main
           branch: chore/aur-bump-${{ needs.resolve.outputs.version }}
