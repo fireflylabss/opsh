@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::shell::Shell;
+use crate::shell::{Shell, is_truthy_env};
 
 pub(crate) const RESET: &str = "\x1b[0m";
 pub(crate) const BOLD: &str = "\x1b[1m";
@@ -23,7 +23,7 @@ impl Shell {
         (raw, styled)
     }
 
-    fn render_prompt(&self, template: &str, styled: bool) -> String {
+    pub(crate) fn render_prompt(&self, template: &str, styled: bool) -> String {
         let cwd = env::current_dir()
             .ok()
             .and_then(|path| compact_path(&path))
@@ -219,18 +219,24 @@ fn git_branch_info() -> Option<GitBranch> {
     if name.is_empty() || name == "HEAD" {
         return None;
     }
-    let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
+    let dirty = git_dirty_check_enabled()
+        && Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
     Some(GitBranch {
         name: name.to_owned(),
         dirty,
     })
+}
+
+/// `OPSH_GIT_DIRTY=0` skips the `git status` dirty marker in `{git}`.
+pub(crate) fn git_dirty_check_enabled() -> bool {
+    env::var("OPSH_GIT_DIRTY").map_or(true, |value| is_truthy_env(&value))
 }
 
 /// Format elapsed time for the prompt. Returns `None` below 10ms to stay quiet.
@@ -275,6 +281,8 @@ fn parse_color_value(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::History;
+    use crate::shell::CWD_LOCK;
 
     #[test]
     fn parses_color_values() {
@@ -331,5 +339,163 @@ mod tests {
         unsafe {
             env::remove_var("OPSH_PROMPT_STYLE");
         }
+    }
+
+    fn test_shell(label: &str) -> Shell {
+        let history = History {
+            path: std::env::temp_dir().join(format!("opsh-{label}-{}", std::process::id())),
+            entries: Vec::new(),
+        };
+        Shell::new(history)
+    }
+
+    #[test]
+    fn renders_prompt_placeholders_raw() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let mut shell = test_shell("prompt-raw");
+        let cwd = env::current_dir().unwrap();
+
+        assert_eq!(
+            shell.render_prompt("{cwd:full}", false),
+            cwd.display().to_string()
+        );
+        assert_eq!(
+            shell.render_prompt("{cwd}", false),
+            compact_path(&cwd).unwrap()
+        );
+        assert_eq!(shell.render_prompt("{mark}{prompt}", false), "◆›");
+        assert_eq!(shell.render_prompt("[{status}]", false), "[]");
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[]");
+        assert_eq!(shell.render_prompt("[{stack}]", false), "[]");
+        assert_eq!(shell.render_prompt("plain text", false), "plain text");
+        assert_eq!(shell.render_prompt("{unknown}", false), "{unknown}");
+
+        shell.last_status = 42;
+        assert_eq!(shell.render_prompt("[{status}]", false), "[ ×42]");
+
+        shell.last_elapsed = Some(Duration::from_millis(250));
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[ 250ms]");
+        shell.last_elapsed = Some(Duration::from_millis(3));
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[]");
+
+        shell.directory_stack.push(cwd.clone());
+        shell.directory_stack.push(cwd.clone());
+        assert_eq!(shell.render_prompt("[{stack}]", false), "[ ·2]");
+
+        assert_eq!(
+            shell.render_prompt("{mark}{status}{stack} {prompt} ", false),
+            "◆ ×42 ·2 › "
+        );
+    }
+
+    #[test]
+    fn styled_prompt_matches_raw_without_color() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let mut shell = test_shell("prompt-styled");
+        shell.color = false;
+        shell.last_status = 2;
+        shell.last_elapsed = Some(Duration::from_millis(1200));
+        let template = "{mark} {cwd}{status}{elapsed}{stack} {prompt} ";
+        assert_eq!(
+            shell.render_prompt(template, true),
+            shell.render_prompt(template, false)
+        );
+    }
+
+    #[test]
+    fn styled_prompt_wraps_placeholders_in_color() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        unsafe {
+            env::remove_var("OPSH_COLOR_OK");
+            env::remove_var("OPSH_COLOR_ERR");
+            env::remove_var("OPSH_COLOR_PATH");
+            env::remove_var("OPSH_COLOR_MARK");
+        }
+        let mut shell = test_shell("prompt-color");
+        shell.color = true;
+        assert_eq!(
+            shell.render_prompt("{mark}", true),
+            format!("{GREEN}◆{RESET}")
+        );
+        assert_eq!(
+            shell.render_prompt("{prompt}", true),
+            format!("{YELLOW}›{RESET}")
+        );
+        shell.last_status = 7;
+        assert_eq!(
+            shell.render_prompt("{mark}{status}", true),
+            format!("{RED}◆{RESET} {RED}×7{RESET}")
+        );
+        let cwd = env::current_dir().unwrap();
+        assert_eq!(
+            shell.render_prompt("{cwd:full}", true),
+            format!("{BLUE}{}{RESET}", cwd.display())
+        );
+    }
+
+    #[test]
+    fn format_elapsed_boundaries() {
+        assert_eq!(format_elapsed(Duration::ZERO), None);
+        assert_eq!(format_elapsed(Duration::from_millis(9)), None);
+        assert_eq!(
+            format_elapsed(Duration::from_millis(10)),
+            Some("10ms".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(999)),
+            Some("999ms".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(1000)),
+            Some("1.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(1049)),
+            Some("1.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(2550)),
+            Some("2.5s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_secs(90)),
+            Some("90.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_micros(10_499)),
+            Some("10ms".into())
+        );
+    }
+
+    #[test]
+    fn parse_color_value_handles_disabling_keywords() {
+        for value in [
+            "", "   ", "0", "off", "OFF", "false", "False", "no", "none", " none ",
+        ] {
+            assert_eq!(parse_color_value(value), Some(String::new()), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn parse_color_value_handles_sgr_and_escapes() {
+        assert_eq!(parse_color_value("31"), Some("\x1b[31m".into()));
+        assert_eq!(parse_color_value("1;31"), Some("\x1b[1;31m".into()));
+        assert_eq!(
+            parse_color_value("  38;5;75  "),
+            Some("\x1b[38;5;75m".into())
+        );
+        assert_eq!(parse_color_value("\x1b[1;32m"), Some("\x1b[1;32m".into()));
+        assert_eq!(parse_color_value("\\x1b[35m"), Some("\x1b[35m".into()));
+        assert_eq!(parse_color_value("  \\x1b[35m  "), Some("\x1b[35m".into()));
+    }
+
+    #[test]
+    fn parse_color_value_rejects_garbage() {
+        assert_eq!(parse_color_value("red"), None);
+        assert_eq!(parse_color_value("38;5;x"), None);
+        assert_eq!(parse_color_value("#ff0000"), None);
+        assert_eq!(parse_color_value("[31m"), None);
+        assert_eq!(parse_color_value("1 31"), None);
+        assert_eq!(parse_color_value("true"), None);
     }
 }

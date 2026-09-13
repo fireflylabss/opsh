@@ -326,4 +326,177 @@ mod tests {
         assert!(!needs_posix_shell(r#"echo "a|b""#));
         assert!(!needs_posix_shell("set NAME a&b"));
     }
+
+    #[test]
+    fn splits_chains_on_operators() {
+        let (segments, operators) = split_chain("cd /tmp && ls || echo no; pwd").unwrap();
+        assert_eq!(segments, vec!["cd /tmp", "ls", "echo no", "pwd"]);
+        assert_eq!(operators, vec![ChainOp::And, ChainOp::Or, ChainOp::Seq]);
+
+        let (segments, operators) = split_chain("just one").unwrap();
+        assert_eq!(segments, vec!["just one"]);
+        assert!(operators.is_empty());
+
+        let (segments, operators) = split_chain("  a  ;  b  ").unwrap();
+        assert_eq!(segments, vec!["a", "b"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+    }
+
+    #[test]
+    fn split_chain_keeps_quoted_operators_intact() {
+        let (segments, operators) = split_chain("echo 'a && b' && echo \"c; d\"").unwrap();
+        assert_eq!(segments, vec!["echo 'a && b'", "echo \"c; d\""]);
+        assert_eq!(operators, vec![ChainOp::And]);
+
+        let (segments, operators) = split_chain("echo \"it's\"; echo done").unwrap();
+        assert_eq!(segments, vec!["echo \"it's\"", "echo done"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+    }
+
+    #[test]
+    fn split_chain_keeps_escaped_operators_intact() {
+        let (segments, operators) = split_chain(r"echo a\;b; echo c").unwrap();
+        assert_eq!(segments, vec![r"echo a\;b", "echo c"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+
+        let (segments, operators) = split_chain(r"echo a \&& b").unwrap();
+        assert_eq!(segments, vec![r"echo a \&& b"]);
+        assert!(operators.is_empty());
+
+        let (segments, operators) = split_chain(r"echo a \|| b").unwrap();
+        assert_eq!(segments, vec![r"echo a \|| b"]);
+        assert!(operators.is_empty());
+
+        let (segments, _) = split_chain(r"echo 'a\'; echo b").unwrap();
+        assert_eq!(segments, vec![r"echo 'a\'", "echo b"]);
+    }
+
+    #[test]
+    fn split_chain_rejects_malformed_input() {
+        assert_eq!(
+            split_chain("echo a &&").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(
+            split_chain("&& echo a").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(
+            split_chain("echo a; ; echo b").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(split_chain("echo 'a && b").unwrap_err(), "unclosed quote");
+        assert_eq!(split_chain("echo \"a; b").unwrap_err(), "unclosed quote");
+    }
+
+    #[test]
+    fn scan_operators_detects_each_kind() {
+        assert!(has_chain_operators("a && b"));
+        assert!(has_chain_operators("a || b"));
+        assert!(has_chain_operators("a; b"));
+        assert!(!has_chain_operators("a | b"));
+        assert!(!has_chain_operators("a &"));
+
+        assert!(needs_posix_shell("a | b"));
+        assert!(needs_posix_shell("a > out"));
+        assert!(needs_posix_shell("a >> out"));
+        assert!(needs_posix_shell("a < in"));
+        assert!(needs_posix_shell("a 2>&1"));
+        assert!(needs_posix_shell("echo `date`"));
+        assert!(needs_posix_shell("echo $(date)"));
+        assert!(needs_posix_shell("(cd /tmp && ls)"));
+        assert!(needs_posix_shell("sleep 1 &"));
+        assert!(needs_posix_shell("sleep 1 & echo"));
+        assert!(needs_posix_shell("& echo"));
+        assert!(!needs_posix_shell("a && b || c; d"));
+        assert!(!needs_posix_shell("echo $HOME"));
+        assert!(!needs_posix_shell("set X a&b"));
+    }
+
+    #[test]
+    fn scan_operators_ignores_quoted_and_escaped_operators() {
+        assert!(!needs_posix_shell("echo 'a | b'"));
+        assert!(!needs_posix_shell("echo \"a > b\""));
+        assert!(!needs_posix_shell("echo '$(date)'"));
+        assert!(!needs_posix_shell("echo \"(x)\""));
+        assert!(!needs_posix_shell("echo '`x`'"));
+        assert!(!needs_posix_shell("echo 'sleep &'"));
+        assert!(!needs_posix_shell(r"echo a\|b"));
+        assert!(!needs_posix_shell(r"echo a \> b"));
+        assert!(!needs_posix_shell(r"echo \(x\)"));
+        assert!(!needs_posix_shell(r"echo \$x"));
+        assert!(!has_chain_operators("echo 'a; b'"));
+        assert!(!has_chain_operators("echo \"a || b\""));
+        assert!(!has_chain_operators(r"echo a\;b"));
+        assert!(!has_chain_operators(r"echo a \&& b"));
+        assert!(!has_chain_operators("echo \"it's; fine\""));
+        assert!(needs_posix_shell("echo 'a' | wc"));
+        assert!(has_chain_operators("echo 'a' && echo b"));
+    }
+
+    #[test]
+    fn shell_quote_leaves_safe_values_bare() {
+        assert_eq!(shell_quote("ls"), "ls");
+        assert_eq!(shell_quote("ls-la_v2"), "ls-la_v2");
+        assert_eq!(shell_quote("/usr/bin/env"), "/usr/bin/env");
+        assert_eq!(shell_quote("a.b:c=d"), "a.b:c=d");
+        assert_eq!(shell_quote("ABC123"), "ABC123");
+    }
+
+    #[test]
+    fn shell_quote_wraps_unsafe_values() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("ls -la"), "'ls -la'");
+        assert_eq!(shell_quote("a|b"), "'a|b'");
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+        assert_eq!(shell_quote("a\"b"), "'a\"b'");
+        assert_eq!(shell_quote("a\\b"), "'a\\b'");
+        assert_eq!(shell_quote("*"), "'*'");
+        assert_eq!(shell_quote("tab\there"), "'tab\there'");
+        assert_eq!(shell_quote("ünïcode"), "'ünïcode'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote("'"), r"''\'''");
+        assert_eq!(shell_quote("a'b'c"), r"'a'\''b'\''c'");
+    }
+
+    #[test]
+    fn shell_quote_round_trips_through_split_words() {
+        for value in [
+            "plain",
+            "with space",
+            "it's",
+            "a'b'c",
+            "$HOME and `cmd`",
+            "quote\"inside",
+            "back\\slash",
+            "semi;colon && and",
+        ] {
+            let quoted = shell_quote(value);
+            let words = split_words(&format!("echo {quoted}")).unwrap();
+            assert_eq!(
+                words,
+                vec!["echo".to_owned(), value.to_owned()],
+                "{value:?}"
+            );
+        }
+    }
+
+    // Known gap: `split_words` drops empty quoted words (`''` / `""`), so an
+    // argument that is intentionally empty disappears instead of being passed on.
+    #[test]
+    #[ignore]
+    fn split_words_keeps_empty_quoted_arguments() {
+        assert_eq!(
+            split_words("echo ''").unwrap(),
+            vec!["echo".to_owned(), String::new()]
+        );
+        assert_eq!(
+            split_words(r#"set NAME """#).unwrap(),
+            vec!["set".to_owned(), "NAME".to_owned(), String::new()]
+        );
+    }
 }

@@ -180,4 +180,80 @@ mod tests {
         assert!(expand_history_refs("!9", &entries).is_err());
         assert!(expand_history_refs("!0", &entries).is_err());
     }
+
+    #[test]
+    fn history_refs_expand_only_at_word_start() {
+        let entries = vec!["echo one".into(), "echo two".into()];
+        assert_eq!(
+            expand_history_refs("echo !!", &entries).unwrap(),
+            ("echo echo two".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("  !1  ", &entries).unwrap(),
+            ("  echo one  ".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("a!!", &entries).unwrap(),
+            ("a!!".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo hello!", &entries).unwrap(),
+            ("echo hello!".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo ! !", &entries).unwrap(),
+            ("echo ! !".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("!1 && !2", &entries).unwrap(),
+            ("echo one && echo two".into(), true)
+        );
+    }
+
+    #[test]
+    fn history_refs_respect_quotes() {
+        let entries = vec!["pwd".into()];
+        assert_eq!(
+            expand_history_refs("echo '!1'", &entries).unwrap(),
+            ("echo '!1'".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo \"!!\"", &entries).unwrap(),
+            ("echo \"!!\"".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo \" !!\"", &entries).unwrap(),
+            ("echo \" pwd\"".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("echo 'x' !!", &entries).unwrap(),
+            ("echo 'x' pwd".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("echo \\!!", &entries).unwrap(),
+            ("echo \\!!".into(), false)
+        );
+    }
+
+    #[test]
+    fn history_refs_report_invalid_indices() {
+        let entries = vec!["one".into(), "two".into()];
+        assert_eq!(
+            expand_history_refs("!2", &entries).unwrap(),
+            ("two".into(), true)
+        );
+        let error = expand_history_refs("!3", &entries).unwrap_err();
+        assert!(error.contains("!3"), "{error}");
+        assert!(error.contains("2 entries"), "{error}");
+        let error = expand_history_refs("!0", &entries).unwrap_err();
+        assert!(error.contains("start at 1"), "{error}");
+        let error = expand_history_refs("!!", &[]).unwrap_err();
+        assert!(error.contains("no history yet"), "{error}");
+        let error = expand_history_refs("!99999999999999999999999", &entries).unwrap_err();
+        assert!(error.contains("invalid history index"), "{error}");
+        assert_eq!(
+            expand_history_refs("!01", &entries).unwrap(),
+            ("one".into(), true)
+        );
+    }
 }

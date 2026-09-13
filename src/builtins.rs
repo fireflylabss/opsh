@@ -6,8 +6,10 @@ use std::process::Command;
 use std::time::Instant;
 
 use crate::parser::{command_tail, shell_quote};
-use crate::prompt::{BOLD, CYAN, DIM, GREEN, RESET, VIOLET, compact_path, prompt_template};
-use crate::shell::{Flow, Shell, command_shell, rc_path};
+use crate::prompt::{
+    BOLD, CYAN, DIM, GREEN, RESET, VIOLET, compact_path, git_dirty_check_enabled, prompt_template,
+};
+use crate::shell::{Flow, Shell, command_shell, rc_path, run_foreground};
 
 const MAX_SOURCE_DEPTH: usize = 32;
 
@@ -16,6 +18,69 @@ pub(crate) const BUILTINS: &[&str] = &[
     "mkcd", "mkdir", "open", "path", "popd", "pushd", "pwd", "repeat", "set", "source", "status",
     "time", "touch", "unalias", "unset", "which",
 ];
+
+pub(crate) fn parse_exit_code(value: Option<&String>) -> Result<i32, String> {
+    value.map_or(Ok(0), |code| {
+        code.parse()
+            .map_err(|_| format!("exit: invalid status: {code}"))
+    })
+}
+
+fn expand_home(value: &str) -> Result<PathBuf, String> {
+    if value == "~" {
+        return env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or("HOME is not set".into());
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        return env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(rest))
+            .ok_or("HOME is not set".into());
+    }
+    Ok(PathBuf::from(value))
+}
+
+pub(crate) fn is_builtin(command: &str) -> bool {
+    BUILTINS.binary_search(&command).is_ok()
+}
+
+fn is_valid_alias_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
+        && chars.all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+}
+
+fn is_valid_env_key(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+pub(crate) fn find_in_path(command: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|directory| directory.join(command))
+        .find(|candidate| is_executable(candidate))
+}
+
+pub(crate) fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
 
 impl Shell {
     pub(crate) fn cd(&mut self, argument: Option<&str>) -> Result<Flow, String> {
@@ -263,11 +328,9 @@ impl Shell {
         } else {
             "xdg-open"
         };
-        let status = Command::new(opener)
-            .arg(&path)
-            .status()
+        let status = run_foreground(Command::new(opener).arg(&path))
             .map_err(|error| format!("open: {opener}: {error}"))?;
-        Ok(Flow::Continue(status.code().unwrap_or(1)))
+        Ok(Flow::Continue(status))
     }
 
     pub(crate) fn set(&self, words: &[String]) -> Result<Flow, String> {
@@ -518,6 +581,15 @@ impl Shell {
                 "color.accent",
                 env::var("OPSH_COLOR_ACCENT").unwrap_or_else(|_| "38;5;183".into()),
             ),
+            (
+                "git_dirty",
+                if git_dirty_check_enabled() {
+                    "on"
+                } else {
+                    "off"
+                }
+                .to_owned(),
+            ),
             ("shell", command_shell()),
             ("history", self.history.path.display().to_string()),
             (
@@ -541,69 +613,6 @@ impl Shell {
 
     fn command(&self, name: &str) -> String {
         format!("{}{}{}", self.ansi_accent(), name, self.ansi_reset())
-    }
-}
-
-pub(crate) fn parse_exit_code(value: Option<&String>) -> Result<i32, String> {
-    value.map_or(Ok(0), |code| {
-        code.parse()
-            .map_err(|_| format!("exit: invalid status: {code}"))
-    })
-}
-
-fn expand_home(value: &str) -> Result<PathBuf, String> {
-    if value == "~" {
-        return env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or("HOME is not set".into());
-    }
-    if let Some(rest) = value.strip_prefix("~/") {
-        return env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(rest))
-            .ok_or("HOME is not set".into());
-    }
-    Ok(PathBuf::from(value))
-}
-
-pub(crate) fn is_builtin(command: &str) -> bool {
-    BUILTINS.binary_search(&command).is_ok()
-}
-
-fn is_valid_alias_name(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
-        && chars.all(|character| {
-            character.is_ascii_alphanumeric() || character == '_' || character == '-'
-        })
-}
-
-fn is_valid_env_key(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
-        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
-}
-
-fn find_in_path(command: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path)
-        .map(|directory| directory.join(command))
-        .find(|candidate| is_executable(candidate))
-}
-
-pub(crate) fn is_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        true
     }
 }
 
