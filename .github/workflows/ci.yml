@@ -9,12 +9,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: opsh
+      - uses: actions/checkout@v4
+        with:
+          repository: fireflylabss/optionSDK
+          path: optionSDK
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Format
         run: cargo fmt --check
+        working-directory: opsh
       - name: Test
         run: cargo test
+        working-directory: opsh
       - name: Release build
         run: cargo build --release
+        working-directory: opsh
