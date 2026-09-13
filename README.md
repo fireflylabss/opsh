@@ -92,8 +92,9 @@ set OPSH_COLOR_PATH 38;5;81
 |---|---|
 | `OPSH_RC` | Startup file path |
 | `OPSH_HISTORY` | History file path |
-| `OPSH_SHELL` | POSIX shell for pipes / redirects (never fish) |
+| `OPSH_SHELL` | POSIX shell for pipes / redirects (never fish); must exist and be executable, otherwise opsh warns once and uses `/bin/sh` |
 | `OPSH_BANNER` | `0` / `false` / `off` hides the startup banner (`opsh -q` also hides it) |
+| `OPSH_GIT_DIRTY` | `0` / `false` / `off` skips the `git status` dirty check behind `{git}` (faster on large repos; only tracked files are checked by default) |
 | `OPSH_PROMPT_STYLE` | `double` (default) or `single` |
 | `OPSH_PROMPT` | Custom template; placeholders: `{mark}` `{cwd}` `{cwd:full}` `{git}` `{status}` `{elapsed}` `{prompt}` `{stack}` |
 | `OPSH_COLOR_OK` | Success color (default `38;5;114`) |

@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,8 @@ use rustyline::hint::HistoryHinter;
 use rustyline::{Config, Context, Editor, Helper, Hinter, Validator};
 
 const MAX_HISTORY: usize = 1_000;
+const DEFAULT_SHELL: &str = "/bin/sh";
+static SHELL_WARNED: AtomicBool = AtomicBool::new(false);
 const MAX_SOURCE_DEPTH: usize = 32;
 
 const BUILTINS: &[&str] = &[
@@ -237,13 +240,7 @@ impl Shell {
         if self.quiet {
             return false;
         }
-        match env::var("OPSH_BANNER") {
-            Ok(value) => !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
-            ),
-            Err(_) => true,
-        }
+        env::var("OPSH_BANNER").map_or(true, |value| is_truthy_env(&value))
     }
 
     fn load_rc(&mut self) -> Result<(), String> {
@@ -274,6 +271,11 @@ impl Shell {
         for entry in &self.history.entries {
             let _ = editor.add_history_entry(entry.as_str());
         }
+        // Ctrl+C must never end the session: in raw mode rustyline reports it as
+        // `Interrupted`, and when the terminal is not raw (`TERM=dumb`) the
+        // signal would otherwise kill opsh. Children get `SIGINT` back on exec.
+        #[cfg(unix)]
+        let _sigint = sigint::Ignored::new();
 
         loop {
             let (raw, styled) = self.prompt_pair();
@@ -316,9 +318,7 @@ impl Shell {
 
     fn batch_repl(&mut self) -> Result<i32, String> {
         let stdin = io::stdin();
-        let mut lines = stdin.lock().lines();
-        loop {
-            let Some(line) = lines.next() else { break };
+        for line in stdin.lock().lines() {
             let line = line.map_err(|error| error.to_string())?;
             match self.execute(&line) {
                 Ok(Flow::Continue(code)) => self.last_status = code,
@@ -694,11 +694,9 @@ impl Shell {
         } else {
             "xdg-open"
         };
-        let status = Command::new(opener)
-            .arg(&path)
-            .status()
+        let status = run_foreground(Command::new(opener).arg(&path))
             .map_err(|error| format!("open: {opener}: {error}"))?;
-        Ok(Flow::Continue(status.code().unwrap_or(1)))
+        Ok(Flow::Continue(status))
     }
 
     fn set(&self, words: &[String]) -> Result<Flow, String> {
@@ -915,12 +913,9 @@ impl Shell {
 
     fn external(&self, command: &str) -> Result<Flow, String> {
         let shell = command_shell();
-        let status = Command::new(&shell)
-            .arg("-c")
-            .arg(command)
-            .status()
+        let status = run_foreground(Command::new(&shell).arg("-c").arg(command))
             .map_err(|error| format!("could not run command: {error}"))?;
-        Ok(Flow::Continue(status.code().unwrap_or(1)))
+        Ok(Flow::Continue(status))
     }
 
     fn banner(&self) {
@@ -1080,6 +1075,15 @@ impl Shell {
                 "color.accent",
                 env::var("OPSH_COLOR_ACCENT").unwrap_or_else(|_| "38;5;183".into()),
             ),
+            (
+                "git_dirty",
+                if git_dirty_check_enabled() {
+                    "on"
+                } else {
+                    "off"
+                }
+                .to_owned(),
+            ),
             ("shell", command_shell()),
             ("history", self.history.path.display().to_string()),
             (
@@ -1233,13 +1237,12 @@ fn command_tail(input: &str, skip_words: usize) -> Option<&str> {
 }
 
 fn skip_one_word(input: &str) -> Option<&str> {
-    let mut chars = input.char_indices().peekable();
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
     let mut started = false;
 
-    while let Some((index, character)) = chars.next() {
+    for (index, character) in input.char_indices() {
         if escaped {
             escaped = false;
             started = true;
@@ -1368,18 +1371,105 @@ fn git_branch_info() -> Option<GitBranch> {
     if name.is_empty() || name == "HEAD" {
         return None;
     }
-    let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
+    let dirty = git_dirty_check_enabled()
+        && Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
     Some(GitBranch {
         name: name.to_owned(),
         dirty,
     })
+}
+
+/// `OPSH_GIT_DIRTY=0` skips the `git status` dirty marker in `{git}`.
+fn git_dirty_check_enabled() -> bool {
+    env::var("OPSH_GIT_DIRTY").map_or(true, |value| is_truthy_env(&value))
+}
+
+fn is_truthy_env(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+/// Run a child in the foreground and wait for it. `SIGINT` is ignored in opsh
+/// while the child runs so Ctrl+C reaches only the child; the child itself
+/// gets the default disposition back before `exec`. A signal-killed child
+/// reports `128 + signal` (130 for Ctrl+C), like POSIX shells.
+fn run_foreground(command: &mut Command) -> io::Result<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let _guard = sigint::Ignored::new();
+        // SAFETY: only async-signal-safe `signal(2)` runs between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                sigint::set_default();
+                Ok(())
+            });
+        }
+        let status = command.status()?;
+        Ok(exit_code_from(status.code(), status.signal()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status()?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+fn exit_code_from(code: Option<i32>, signal: Option<i32>) -> i32 {
+    match (code, signal) {
+        (Some(code), _) => code,
+        (None, Some(signal)) => 128 + signal,
+        (None, None) => 1,
+    }
+}
+
+#[cfg(unix)]
+mod sigint {
+    use std::ffi::c_int;
+
+    const SIGINT: c_int = 2;
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+
+    unsafe extern "C" {
+        fn signal(signum: c_int, handler: usize) -> usize;
+    }
+
+    /// Ignores `SIGINT` for the lifetime of the guard, then restores the
+    /// previous disposition.
+    pub struct Ignored {
+        previous: usize,
+    }
+
+    impl Ignored {
+        pub fn new() -> Self {
+            // SAFETY: `signal` is a plain libc call with a constant handler value.
+            let previous = unsafe { signal(SIGINT, SIG_IGN) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for Ignored {
+        fn drop(&mut self) {
+            // SAFETY: restores the disposition captured in `new`.
+            unsafe { signal(SIGINT, self.previous) };
+        }
+    }
+
+    pub fn set_default() {
+        // SAFETY: `signal` is async-signal-safe; called between fork and exec.
+        unsafe { signal(SIGINT, SIG_DFL) };
+    }
 }
 
 /// Format elapsed time for the prompt. Returns `None` below 10ms to stay quiet.
@@ -1515,12 +1605,36 @@ fn shell_quote(value: &str) -> String {
 /// POSIX syntax go through `/bin/sh`, unless `OPSH_SHELL` or a non-fish `$SHELL`
 /// is set.
 fn command_shell() -> String {
-    if let Ok(shell) = env::var("OPSH_SHELL") {
-        return shell;
+    let (source, candidate) = match env::var("OPSH_SHELL") {
+        Ok(shell) => ("OPSH_SHELL", shell),
+        Err(_) => match env::var("SHELL") {
+            Ok(shell) if !is_fish_shell(&shell) => ("SHELL", shell),
+            _ => return DEFAULT_SHELL.into(),
+        },
+    };
+    if shell_is_usable(&candidate) {
+        return candidate;
     }
-    match env::var("SHELL") {
-        Ok(shell) if !is_fish_shell(&shell) => shell,
-        _ => "/bin/sh".into(),
+    if !SHELL_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "opsh: ${source}={candidate:?} is not an executable shell; using {DEFAULT_SHELL}"
+        );
+    }
+    DEFAULT_SHELL.into()
+}
+
+/// Absolute paths must point at an executable file; bare names must resolve
+/// through `PATH`.
+fn shell_is_usable(shell: &str) -> bool {
+    let trimmed = shell.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() || trimmed.contains('/') {
+        is_executable(path)
+    } else {
+        find_in_path(trimmed).is_some()
     }
 }
 
@@ -1819,6 +1933,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_truthy_env_values() {
+        assert!(is_truthy_env("1"));
+        assert!(is_truthy_env("on"));
+        assert!(is_truthy_env(""));
+        assert!(!is_truthy_env("0"));
+        assert!(!is_truthy_env(" OFF "));
+        assert!(!is_truthy_env("false"));
+        assert!(!is_truthy_env("no"));
+    }
+
+    #[test]
     fn skips_fish_as_command_shell() {
         assert!(is_fish_shell("/bin/fish"));
         assert!(is_fish_shell("/usr/bin/fish"));
@@ -1826,6 +1951,39 @@ mod tests {
         assert!(!is_fish_shell("/bin/bash"));
         assert!(!is_fish_shell("/bin/sh"));
         assert!(!is_fish_shell("/usr/bin/zsh"));
+    }
+
+    #[test]
+    fn maps_child_exit_status_like_posix() {
+        assert_eq!(exit_code_from(Some(0), None), 0);
+        assert_eq!(exit_code_from(Some(3), None), 3);
+        assert_eq!(exit_code_from(None, Some(2)), 130);
+        assert_eq!(exit_code_from(None, Some(9)), 137);
+        assert_eq!(exit_code_from(None, None), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_child_yields_130_and_shell_survives() {
+        let code = run_foreground(Command::new("/bin/sh").args(["-c", "kill -INT $$"]))
+            .expect("child should spawn");
+        assert_eq!(code, 130);
+        // opsh itself must still be alive with SIGINT handling restored
+        assert_eq!(
+            run_foreground(Command::new("/bin/sh").args(["-c", "exit 7"])).unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn validates_command_shell_candidates() {
+        assert!(shell_is_usable("/bin/sh"));
+        assert!(shell_is_usable("sh"));
+        assert!(!shell_is_usable(""));
+        assert!(!shell_is_usable("   "));
+        assert!(!shell_is_usable("/nonexistent/opsh-shell"));
+        assert!(!shell_is_usable("definitely-not-a-shell-binary-opsh"));
+        assert!(!shell_is_usable("/etc/hostname"));
     }
 
     #[test]
@@ -2124,5 +2282,412 @@ mod tests {
         unsafe {
             env::remove_var("OPSH_PROMPT_STYLE");
         }
+    }
+
+    fn test_shell(label: &str) -> Shell {
+        let history = History {
+            path: std::env::temp_dir().join(format!("opsh-{label}-{}", std::process::id())),
+            entries: Vec::new(),
+        };
+        Shell::new(history)
+    }
+
+    #[test]
+    fn history_refs_expand_only_at_word_start() {
+        let entries = vec!["echo one".into(), "echo two".into()];
+        assert_eq!(
+            expand_history_refs("echo !!", &entries).unwrap(),
+            ("echo echo two".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("  !1  ", &entries).unwrap(),
+            ("  echo one  ".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("a!!", &entries).unwrap(),
+            ("a!!".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo hello!", &entries).unwrap(),
+            ("echo hello!".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo ! !", &entries).unwrap(),
+            ("echo ! !".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("!1 && !2", &entries).unwrap(),
+            ("echo one && echo two".into(), true)
+        );
+    }
+
+    #[test]
+    fn history_refs_respect_quotes() {
+        let entries = vec!["pwd".into()];
+        assert_eq!(
+            expand_history_refs("echo '!1'", &entries).unwrap(),
+            ("echo '!1'".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo \"!!\"", &entries).unwrap(),
+            ("echo \"!!\"".into(), false)
+        );
+        assert_eq!(
+            expand_history_refs("echo \" !!\"", &entries).unwrap(),
+            ("echo \" pwd\"".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("echo 'x' !!", &entries).unwrap(),
+            ("echo 'x' pwd".into(), true)
+        );
+        assert_eq!(
+            expand_history_refs("echo \\!!", &entries).unwrap(),
+            ("echo \\!!".into(), false)
+        );
+    }
+
+    #[test]
+    fn history_refs_report_invalid_indices() {
+        let entries = vec!["one".into(), "two".into()];
+        assert_eq!(
+            expand_history_refs("!2", &entries).unwrap(),
+            ("two".into(), true)
+        );
+        let error = expand_history_refs("!3", &entries).unwrap_err();
+        assert!(error.contains("!3"), "{error}");
+        assert!(error.contains("2 entries"), "{error}");
+        let error = expand_history_refs("!0", &entries).unwrap_err();
+        assert!(error.contains("start at 1"), "{error}");
+        let error = expand_history_refs("!!", &[]).unwrap_err();
+        assert!(error.contains("no history yet"), "{error}");
+        let error = expand_history_refs("!99999999999999999999999", &entries).unwrap_err();
+        assert!(error.contains("invalid history index"), "{error}");
+        assert_eq!(
+            expand_history_refs("!01", &entries).unwrap(),
+            ("one".into(), true)
+        );
+    }
+
+    #[test]
+    fn splits_chains_on_operators() {
+        let (segments, operators) = split_chain("cd /tmp && ls || echo no; pwd").unwrap();
+        assert_eq!(segments, vec!["cd /tmp", "ls", "echo no", "pwd"]);
+        assert_eq!(operators, vec![ChainOp::And, ChainOp::Or, ChainOp::Seq]);
+
+        let (segments, operators) = split_chain("just one").unwrap();
+        assert_eq!(segments, vec!["just one"]);
+        assert!(operators.is_empty());
+
+        let (segments, operators) = split_chain("  a  ;  b  ").unwrap();
+        assert_eq!(segments, vec!["a", "b"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+    }
+
+    #[test]
+    fn split_chain_keeps_quoted_operators_intact() {
+        let (segments, operators) = split_chain("echo 'a && b' && echo \"c; d\"").unwrap();
+        assert_eq!(segments, vec!["echo 'a && b'", "echo \"c; d\""]);
+        assert_eq!(operators, vec![ChainOp::And]);
+
+        let (segments, operators) = split_chain("echo \"it's\"; echo done").unwrap();
+        assert_eq!(segments, vec!["echo \"it's\"", "echo done"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+    }
+
+    #[test]
+    fn split_chain_keeps_escaped_operators_intact() {
+        let (segments, operators) = split_chain(r"echo a\;b; echo c").unwrap();
+        assert_eq!(segments, vec![r"echo a\;b", "echo c"]);
+        assert_eq!(operators, vec![ChainOp::Seq]);
+
+        let (segments, operators) = split_chain(r"echo a \&& b").unwrap();
+        assert_eq!(segments, vec![r"echo a \&& b"]);
+        assert!(operators.is_empty());
+
+        let (segments, operators) = split_chain(r"echo a \|| b").unwrap();
+        assert_eq!(segments, vec![r"echo a \|| b"]);
+        assert!(operators.is_empty());
+
+        let (segments, _) = split_chain(r"echo 'a\'; echo b").unwrap();
+        assert_eq!(segments, vec![r"echo 'a\'", "echo b"]);
+    }
+
+    #[test]
+    fn split_chain_rejects_malformed_input() {
+        assert_eq!(
+            split_chain("echo a &&").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(
+            split_chain("&& echo a").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(
+            split_chain("echo a; ; echo b").unwrap_err(),
+            "empty command in chain"
+        );
+        assert_eq!(split_chain("echo 'a && b").unwrap_err(), "unclosed quote");
+        assert_eq!(split_chain("echo \"a; b").unwrap_err(), "unclosed quote");
+    }
+
+    #[test]
+    fn scan_operators_detects_each_kind() {
+        assert!(has_chain_operators("a && b"));
+        assert!(has_chain_operators("a || b"));
+        assert!(has_chain_operators("a; b"));
+        assert!(!has_chain_operators("a | b"));
+        assert!(!has_chain_operators("a &"));
+
+        assert!(needs_posix_shell("a | b"));
+        assert!(needs_posix_shell("a > out"));
+        assert!(needs_posix_shell("a >> out"));
+        assert!(needs_posix_shell("a < in"));
+        assert!(needs_posix_shell("a 2>&1"));
+        assert!(needs_posix_shell("echo `date`"));
+        assert!(needs_posix_shell("echo $(date)"));
+        assert!(needs_posix_shell("(cd /tmp && ls)"));
+        assert!(needs_posix_shell("sleep 1 &"));
+        assert!(needs_posix_shell("sleep 1 & echo"));
+        assert!(needs_posix_shell("& echo"));
+        assert!(!needs_posix_shell("a && b || c; d"));
+        assert!(!needs_posix_shell("echo $HOME"));
+        assert!(!needs_posix_shell("set X a&b"));
+    }
+
+    #[test]
+    fn scan_operators_ignores_quoted_and_escaped_operators() {
+        assert!(!needs_posix_shell("echo 'a | b'"));
+        assert!(!needs_posix_shell("echo \"a > b\""));
+        assert!(!needs_posix_shell("echo '$(date)'"));
+        assert!(!needs_posix_shell("echo \"(x)\""));
+        assert!(!needs_posix_shell("echo '`x`'"));
+        assert!(!needs_posix_shell("echo 'sleep &'"));
+        assert!(!needs_posix_shell(r"echo a\|b"));
+        assert!(!needs_posix_shell(r"echo a \> b"));
+        assert!(!needs_posix_shell(r"echo \(x\)"));
+        assert!(!needs_posix_shell(r"echo \$x"));
+        assert!(!has_chain_operators("echo 'a; b'"));
+        assert!(!has_chain_operators("echo \"a || b\""));
+        assert!(!has_chain_operators(r"echo a\;b"));
+        assert!(!has_chain_operators(r"echo a \&& b"));
+        assert!(!has_chain_operators("echo \"it's; fine\""));
+        assert!(needs_posix_shell("echo 'a' | wc"));
+        assert!(has_chain_operators("echo 'a' && echo b"));
+    }
+
+    #[test]
+    fn renders_prompt_placeholders_raw() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let mut shell = test_shell("prompt-raw");
+        let cwd = env::current_dir().unwrap();
+
+        assert_eq!(
+            shell.render_prompt("{cwd:full}", false),
+            cwd.display().to_string()
+        );
+        assert_eq!(
+            shell.render_prompt("{cwd}", false),
+            compact_path(&cwd).unwrap()
+        );
+        assert_eq!(shell.render_prompt("{mark}{prompt}", false), "◆›");
+        assert_eq!(shell.render_prompt("[{status}]", false), "[]");
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[]");
+        assert_eq!(shell.render_prompt("[{stack}]", false), "[]");
+        assert_eq!(shell.render_prompt("plain text", false), "plain text");
+        assert_eq!(shell.render_prompt("{unknown}", false), "{unknown}");
+
+        shell.last_status = 42;
+        assert_eq!(shell.render_prompt("[{status}]", false), "[ ×42]");
+
+        shell.last_elapsed = Some(Duration::from_millis(250));
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[ 250ms]");
+        shell.last_elapsed = Some(Duration::from_millis(3));
+        assert_eq!(shell.render_prompt("[{elapsed}]", false), "[]");
+
+        shell.directory_stack.push(cwd.clone());
+        shell.directory_stack.push(cwd.clone());
+        assert_eq!(shell.render_prompt("[{stack}]", false), "[ ·2]");
+
+        assert_eq!(
+            shell.render_prompt("{mark}{status}{stack} {prompt} ", false),
+            "◆ ×42 ·2 › "
+        );
+    }
+
+    #[test]
+    fn styled_prompt_matches_raw_without_color() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let mut shell = test_shell("prompt-styled");
+        shell.color = false;
+        shell.last_status = 2;
+        shell.last_elapsed = Some(Duration::from_millis(1200));
+        let template = "{mark} {cwd}{status}{elapsed}{stack} {prompt} ";
+        assert_eq!(
+            shell.render_prompt(template, true),
+            shell.render_prompt(template, false)
+        );
+    }
+
+    #[test]
+    fn styled_prompt_wraps_placeholders_in_color() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        unsafe {
+            env::remove_var("OPSH_COLOR_OK");
+            env::remove_var("OPSH_COLOR_ERR");
+            env::remove_var("OPSH_COLOR_PATH");
+            env::remove_var("OPSH_COLOR_MARK");
+        }
+        let mut shell = test_shell("prompt-color");
+        shell.color = true;
+        assert_eq!(
+            shell.render_prompt("{mark}", true),
+            format!("{GREEN}◆{RESET}")
+        );
+        assert_eq!(
+            shell.render_prompt("{prompt}", true),
+            format!("{YELLOW}›{RESET}")
+        );
+        shell.last_status = 7;
+        assert_eq!(
+            shell.render_prompt("{mark}{status}", true),
+            format!("{RED}◆{RESET} {RED}×7{RESET}")
+        );
+        let cwd = env::current_dir().unwrap();
+        assert_eq!(
+            shell.render_prompt("{cwd:full}", true),
+            format!("{BLUE}{}{RESET}", cwd.display())
+        );
+    }
+
+    #[test]
+    fn format_elapsed_boundaries() {
+        assert_eq!(format_elapsed(Duration::ZERO), None);
+        assert_eq!(format_elapsed(Duration::from_millis(9)), None);
+        assert_eq!(
+            format_elapsed(Duration::from_millis(10)),
+            Some("10ms".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(999)),
+            Some("999ms".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(1000)),
+            Some("1.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(1049)),
+            Some("1.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_millis(2550)),
+            Some("2.5s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_secs(90)),
+            Some("90.0s".into())
+        );
+        assert_eq!(
+            format_elapsed(Duration::from_micros(10_499)),
+            Some("10ms".into())
+        );
+    }
+
+    #[test]
+    fn parse_color_value_handles_disabling_keywords() {
+        for value in [
+            "", "   ", "0", "off", "OFF", "false", "False", "no", "none", " none ",
+        ] {
+            assert_eq!(parse_color_value(value), Some(String::new()), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn parse_color_value_handles_sgr_and_escapes() {
+        assert_eq!(parse_color_value("31"), Some("\x1b[31m".into()));
+        assert_eq!(parse_color_value("1;31"), Some("\x1b[1;31m".into()));
+        assert_eq!(
+            parse_color_value("  38;5;75  "),
+            Some("\x1b[38;5;75m".into())
+        );
+        assert_eq!(parse_color_value("\x1b[1;32m"), Some("\x1b[1;32m".into()));
+        assert_eq!(parse_color_value("\\x1b[35m"), Some("\x1b[35m".into()));
+        assert_eq!(parse_color_value("  \\x1b[35m  "), Some("\x1b[35m".into()));
+    }
+
+    #[test]
+    fn parse_color_value_rejects_garbage() {
+        assert_eq!(parse_color_value("red"), None);
+        assert_eq!(parse_color_value("38;5;x"), None);
+        assert_eq!(parse_color_value("#ff0000"), None);
+        assert_eq!(parse_color_value("[31m"), None);
+        assert_eq!(parse_color_value("1 31"), None);
+        assert_eq!(parse_color_value("true"), None);
+    }
+
+    #[test]
+    fn shell_quote_leaves_safe_values_bare() {
+        assert_eq!(shell_quote("ls"), "ls");
+        assert_eq!(shell_quote("ls-la_v2"), "ls-la_v2");
+        assert_eq!(shell_quote("/usr/bin/env"), "/usr/bin/env");
+        assert_eq!(shell_quote("a.b:c=d"), "a.b:c=d");
+        assert_eq!(shell_quote("ABC123"), "ABC123");
+    }
+
+    #[test]
+    fn shell_quote_wraps_unsafe_values() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("ls -la"), "'ls -la'");
+        assert_eq!(shell_quote("a|b"), "'a|b'");
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+        assert_eq!(shell_quote("a\"b"), "'a\"b'");
+        assert_eq!(shell_quote("a\\b"), "'a\\b'");
+        assert_eq!(shell_quote("*"), "'*'");
+        assert_eq!(shell_quote("tab\there"), "'tab\there'");
+        assert_eq!(shell_quote("ünïcode"), "'ünïcode'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote("'"), r"''\'''");
+        assert_eq!(shell_quote("a'b'c"), r"'a'\''b'\''c'");
+    }
+
+    #[test]
+    fn shell_quote_round_trips_through_split_words() {
+        for value in [
+            "plain",
+            "with space",
+            "it's",
+            "a'b'c",
+            "$HOME and `cmd`",
+            "quote\"inside",
+            "back\\slash",
+            "semi;colon && and",
+        ] {
+            let quoted = shell_quote(value);
+            let words = split_words(&format!("echo {quoted}")).unwrap();
+            assert_eq!(
+                words,
+                vec!["echo".to_owned(), value.to_owned()],
+                "{value:?}"
+            );
+        }
+    }
+
+    // Known gap: `split_words` drops empty quoted words (`''` / `""`), so an
+    // argument that is intentionally empty disappears instead of being passed on.
+    #[test]
+    #[ignore]
+    fn split_words_keeps_empty_quoted_arguments() {
+        assert_eq!(
+            split_words("echo ''").unwrap(),
+            vec!["echo".to_owned(), String::new()]
+        );
+        assert_eq!(
+            split_words(r#"set NAME """#).unwrap(),
+            vec!["set".to_owned(), "NAME".to_owned(), String::new()]
+        );
     }
 }
