@@ -5,6 +5,7 @@ pub(crate) fn split_words(command: &str) -> Result<Vec<String>, String> {
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
+    let mut quoted = false;
 
     while let Some(character) = chars.next() {
         if escaped {
@@ -23,12 +24,19 @@ pub(crate) fn split_words(command: &str) -> Result<Vec<String>, String> {
                     escaped = true;
                 }
             }
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => {
+                in_single = !in_single;
+                quoted = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                quoted = true;
+            }
             character if character.is_whitespace() && !in_single && !in_double => {
-                if !current.is_empty() {
+                if !current.is_empty() || quoted {
                     words.push(std::mem::take(&mut current));
                 }
+                quoted = false;
             }
             _ => current.push(character),
         }
@@ -40,7 +48,7 @@ pub(crate) fn split_words(command: &str) -> Result<Vec<String>, String> {
     if escaped {
         return Err("trailing backslash".into());
     }
-    if !current.is_empty() {
+    if !current.is_empty() || quoted {
         words.push(current);
     }
     Ok(words)
@@ -487,7 +495,6 @@ mod tests {
     // Known gap: `split_words` drops empty quoted words (`''` / `""`), so an
     // argument that is intentionally empty disappears instead of being passed on.
     #[test]
-    #[ignore]
     fn split_words_keeps_empty_quoted_arguments() {
         assert_eq!(
             split_words("echo ''").unwrap(),

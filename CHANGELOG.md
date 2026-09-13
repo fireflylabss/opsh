@@ -6,6 +6,12 @@ All notable changes to opsh are documented here. The format is based on
 
 ## Unreleased
 
+### Fixed
+
+- Empty quoted arguments (`echo ''`, `set NAME ""`) are kept as empty words instead of being dropped.
+- `opsh doctor --json` escapes `"`, `\` and control characters in paths, so the output is always valid JSON.
+- AUR `PKGBUILD` fetches the `optionSDK` tarball alongside the opsh tarball and links it as `../optionSDK`, so the package builds again; `bump.sh` hashes both sources.
+
 ### Changed
 
 - `{git}` prompt token: the dirty check now runs `git status --porcelain --untracked-files=no` (tracked files only) and can be skipped entirely with `OPSH_GIT_DIRTY=0`; shown as `git_dirty` in `config`.
