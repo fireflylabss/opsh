@@ -57,13 +57,12 @@ pub(crate) fn command_tail(input: &str, skip_words: usize) -> Option<&str> {
 }
 
 fn skip_one_word(input: &str) -> Option<&str> {
-    let mut chars = input.char_indices().peekable();
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
     let mut started = false;
 
-    while let Some((index, character)) = chars.next() {
+    for (index, character) in input.char_indices() {
         if escaped {
             escaped = false;
             started = true;

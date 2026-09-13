@@ -156,9 +156,7 @@ impl Shell {
 
     fn batch_repl(&mut self) -> Result<i32, String> {
         let stdin = io::stdin();
-        let mut lines = stdin.lock().lines();
-        loop {
-            let Some(line) = lines.next() else { break };
+        for line in stdin.lock().lines() {
             let line = line.map_err(|error| error.to_string())?;
             match self.execute(&line) {
                 Ok(Flow::Continue(code)) => self.last_status = code,

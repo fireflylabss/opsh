@@ -4,7 +4,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html) wit
 
 ## Surface
 
-opsh is a single surface (CLI `opsh`). Changelog headings use the channel suffix, e.g. `## v0.1.10-stable · DD/MM/YYYY`.
+opsh is a single surface (CLI `opsh`). Changelog headings use the numeric version and ISO date, e.g. `## 0.1.10 — 2026-08-03`, followed by a one-line channel note ("Stable channel (`v0.1.10-stable`).") and `### Added` / `### Changed` sections. Pending work goes under `## Unreleased`.
 
 `Cargo.toml` / git tags keep the numeric version (`0.1.10`, `v0.1.10`) — the channel lives in the changelog (and packaging notes).
 
