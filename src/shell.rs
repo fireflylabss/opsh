@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,8 @@ use rustyline::hint::HistoryHinter;
 use rustyline::{Config, Context, Editor, Helper, Hinter, Validator};
 
 const MAX_HISTORY: usize = 1_000;
+const DEFAULT_SHELL: &str = "/bin/sh";
+static SHELL_WARNED: AtomicBool = AtomicBool::new(false);
 const MAX_SOURCE_DEPTH: usize = 32;
 
 const BUILTINS: &[&str] = &[
@@ -237,13 +240,7 @@ impl Shell {
         if self.quiet {
             return false;
         }
-        match env::var("OPSH_BANNER") {
-            Ok(value) => !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
-            ),
-            Err(_) => true,
-        }
+        env::var("OPSH_BANNER").map_or(true, |value| is_truthy_env(&value))
     }
 
     fn load_rc(&mut self) -> Result<(), String> {
@@ -274,6 +271,11 @@ impl Shell {
         for entry in &self.history.entries {
             let _ = editor.add_history_entry(entry.as_str());
         }
+        // Ctrl+C must never end the session: in raw mode rustyline reports it as
+        // `Interrupted`, and when the terminal is not raw (`TERM=dumb`) the
+        // signal would otherwise kill opsh. Children get `SIGINT` back on exec.
+        #[cfg(unix)]
+        let _sigint = sigint::Ignored::new();
 
         loop {
             let (raw, styled) = self.prompt_pair();
@@ -694,11 +696,9 @@ impl Shell {
         } else {
             "xdg-open"
         };
-        let status = Command::new(opener)
-            .arg(&path)
-            .status()
+        let status = run_foreground(Command::new(opener).arg(&path))
             .map_err(|error| format!("open: {opener}: {error}"))?;
-        Ok(Flow::Continue(status.code().unwrap_or(1)))
+        Ok(Flow::Continue(status))
     }
 
     fn set(&self, words: &[String]) -> Result<Flow, String> {
@@ -915,12 +915,9 @@ impl Shell {
 
     fn external(&self, command: &str) -> Result<Flow, String> {
         let shell = command_shell();
-        let status = Command::new(&shell)
-            .arg("-c")
-            .arg(command)
-            .status()
+        let status = run_foreground(Command::new(&shell).arg("-c").arg(command))
             .map_err(|error| format!("could not run command: {error}"))?;
-        Ok(Flow::Continue(status.code().unwrap_or(1)))
+        Ok(Flow::Continue(status))
     }
 
     fn banner(&self) {
@@ -1079,6 +1076,15 @@ impl Shell {
             (
                 "color.accent",
                 env::var("OPSH_COLOR_ACCENT").unwrap_or_else(|_| "38;5;183".into()),
+            ),
+            (
+                "git_dirty",
+                if git_dirty_check_enabled() {
+                    "on"
+                } else {
+                    "off"
+                }
+                .to_owned(),
             ),
             ("shell", command_shell()),
             ("history", self.history.path.display().to_string()),
@@ -1368,18 +1374,105 @@ fn git_branch_info() -> Option<GitBranch> {
     if name.is_empty() || name == "HEAD" {
         return None;
     }
-    let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
+    let dirty = git_dirty_check_enabled()
+        && Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .is_some_and(|status| status.status.success() && !status.stdout.is_empty());
     Some(GitBranch {
         name: name.to_owned(),
         dirty,
     })
+}
+
+/// `OPSH_GIT_DIRTY=0` skips the `git status` dirty marker in `{git}`.
+fn git_dirty_check_enabled() -> bool {
+    env::var("OPSH_GIT_DIRTY").map_or(true, |value| is_truthy_env(&value))
+}
+
+fn is_truthy_env(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+/// Run a child in the foreground and wait for it. `SIGINT` is ignored in opsh
+/// while the child runs so Ctrl+C reaches only the child; the child itself
+/// gets the default disposition back before `exec`. A signal-killed child
+/// reports `128 + signal` (130 for Ctrl+C), like POSIX shells.
+fn run_foreground(command: &mut Command) -> io::Result<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let _guard = sigint::Ignored::new();
+        // SAFETY: only async-signal-safe `signal(2)` runs between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                sigint::set_default();
+                Ok(())
+            });
+        }
+        let status = command.status()?;
+        Ok(exit_code_from(status.code(), status.signal()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status()?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+fn exit_code_from(code: Option<i32>, signal: Option<i32>) -> i32 {
+    match (code, signal) {
+        (Some(code), _) => code,
+        (None, Some(signal)) => 128 + signal,
+        (None, None) => 1,
+    }
+}
+
+#[cfg(unix)]
+mod sigint {
+    use std::ffi::c_int;
+
+    const SIGINT: c_int = 2;
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+
+    unsafe extern "C" {
+        fn signal(signum: c_int, handler: usize) -> usize;
+    }
+
+    /// Ignores `SIGINT` for the lifetime of the guard, then restores the
+    /// previous disposition.
+    pub struct Ignored {
+        previous: usize,
+    }
+
+    impl Ignored {
+        pub fn new() -> Self {
+            // SAFETY: `signal` is a plain libc call with a constant handler value.
+            let previous = unsafe { signal(SIGINT, SIG_IGN) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for Ignored {
+        fn drop(&mut self) {
+            // SAFETY: restores the disposition captured in `new`.
+            unsafe { signal(SIGINT, self.previous) };
+        }
+    }
+
+    pub fn set_default() {
+        // SAFETY: `signal` is async-signal-safe; called between fork and exec.
+        unsafe { signal(SIGINT, SIG_DFL) };
+    }
 }
 
 /// Format elapsed time for the prompt. Returns `None` below 10ms to stay quiet.
@@ -1515,12 +1608,36 @@ fn shell_quote(value: &str) -> String {
 /// POSIX syntax go through `/bin/sh`, unless `OPSH_SHELL` or a non-fish `$SHELL`
 /// is set.
 fn command_shell() -> String {
-    if let Ok(shell) = env::var("OPSH_SHELL") {
-        return shell;
+    let (source, candidate) = match env::var("OPSH_SHELL") {
+        Ok(shell) => ("OPSH_SHELL", shell),
+        Err(_) => match env::var("SHELL") {
+            Ok(shell) if !is_fish_shell(&shell) => ("SHELL", shell),
+            _ => return DEFAULT_SHELL.into(),
+        },
+    };
+    if shell_is_usable(&candidate) {
+        return candidate;
     }
-    match env::var("SHELL") {
-        Ok(shell) if !is_fish_shell(&shell) => shell,
-        _ => "/bin/sh".into(),
+    if !SHELL_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "opsh: ${source}={candidate:?} is not an executable shell; using {DEFAULT_SHELL}"
+        );
+    }
+    DEFAULT_SHELL.into()
+}
+
+/// Absolute paths must point at an executable file; bare names must resolve
+/// through `PATH`.
+fn shell_is_usable(shell: &str) -> bool {
+    let trimmed = shell.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() || trimmed.contains('/') {
+        is_executable(path)
+    } else {
+        find_in_path(trimmed).is_some()
     }
 }
 
@@ -1819,6 +1936,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_truthy_env_values() {
+        assert!(is_truthy_env("1"));
+        assert!(is_truthy_env("on"));
+        assert!(is_truthy_env(""));
+        assert!(!is_truthy_env("0"));
+        assert!(!is_truthy_env(" OFF "));
+        assert!(!is_truthy_env("false"));
+        assert!(!is_truthy_env("no"));
+    }
+
+    #[test]
     fn skips_fish_as_command_shell() {
         assert!(is_fish_shell("/bin/fish"));
         assert!(is_fish_shell("/usr/bin/fish"));
@@ -1826,6 +1954,39 @@ mod tests {
         assert!(!is_fish_shell("/bin/bash"));
         assert!(!is_fish_shell("/bin/sh"));
         assert!(!is_fish_shell("/usr/bin/zsh"));
+    }
+
+    #[test]
+    fn maps_child_exit_status_like_posix() {
+        assert_eq!(exit_code_from(Some(0), None), 0);
+        assert_eq!(exit_code_from(Some(3), None), 3);
+        assert_eq!(exit_code_from(None, Some(2)), 130);
+        assert_eq!(exit_code_from(None, Some(9)), 137);
+        assert_eq!(exit_code_from(None, None), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_child_yields_130_and_shell_survives() {
+        let code = run_foreground(Command::new("/bin/sh").args(["-c", "kill -INT $$"]))
+            .expect("child should spawn");
+        assert_eq!(code, 130);
+        // opsh itself must still be alive with SIGINT handling restored
+        assert_eq!(
+            run_foreground(Command::new("/bin/sh").args(["-c", "exit 7"])).unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn validates_command_shell_candidates() {
+        assert!(shell_is_usable("/bin/sh"));
+        assert!(shell_is_usable("sh"));
+        assert!(!shell_is_usable(""));
+        assert!(!shell_is_usable("   "));
+        assert!(!shell_is_usable("/nonexistent/opsh-shell"));
+        assert!(!shell_is_usable("definitely-not-a-shell-binary-opsh"));
+        assert!(!shell_is_usable("/etc/hostname"));
     }
 
     #[test]
