@@ -1,18 +1,34 @@
 # Changelog
 
-All notable changes to opsh are documented here.
+All notable changes to opsh are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.0.0/); release channels
+(alpha/beta/stable) are described in [VERSIONING.md](VERSIONING.md).
 
-## v0.1.11-stable · 04/09/2026
+## Unreleased
 
-`doctor` command, family SDK path, and agent docs. This version was made for CLI with a stable release channel on 04/09/2026 (v0.1.11-stable).
+### Changed
+
+- CI runs `cargo clippy --all-targets -- -D warnings` and a `cargo audit` job; Dependabot watches `cargo` and `github-actions` weekly.
+- The release workflow opens a PR with the AUR packaging bump instead of pushing to `main`.
+
+## 0.1.11 — 2026-09-04
+
+Stable channel (`v0.1.11-stable`). `doctor` command, family SDK path, and agent docs.
+
+### Added
 
 - New `opsh doctor [--json]`: checks `~/.option/opsh` state dir, `history`/`rc` paths, and the POSIX shell (`$OPSH_SHELL` / `$SHELL` / `/bin/sh`).
+- `VERSIONING.md` (single CLI surface) and `AGENTS.md` (build/test/install checklist).
+
+### Changed
+
 - Depend on `optionSDK` via the local family path (`../optionSDK`) instead of crates.io only, matching `optionUtils`.
-- Add `VERSIONING.md` (single CLI surface) and `AGENTS.md` (build/test/install checklist).
 
-## v0.1.10-stable · 03/08/2026
+## 0.1.10 — 2026-08-03
 
-Shared SDK 0.1.3 release alignment. This version was made for CLI with a stable release channel on 03/08/2026 (v0.1.10-stable).
+Stable channel (`v0.1.10-stable`). Shared SDK 0.1.3 release alignment.
+
+### Changed
 
 - Adopt the canonical `optionSDK` 0.1.3 contract for shared paths and atomic persistence helpers.
 - Keep the `opsh` binary and its existing local-first history/rc behavior unchanged.
