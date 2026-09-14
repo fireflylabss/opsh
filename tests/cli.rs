@@ -423,10 +423,7 @@ fn doctor_json_has_expected_shape() {
     assert_eq!(field("shell_ok"), &JsonValue::Bool(true));
 }
 
-// Known gap: `cmd_doctor` interpolates paths into the JSON output without
-// escaping, so a path containing `"` or `\` yields invalid JSON.
 #[test]
-#[ignore]
 fn doctor_json_escapes_special_characters_in_paths() {
     let sandbox = Sandbox::new("doctor-escape");
     let rc = sandbox.path(r#"quote"back\slash"#);
