@@ -48,7 +48,7 @@ jobs:
           ./packaging/aur/bump.sh "${{ needs.resolve.outputs.tag }}"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: opsh
           pkgbuild: ./packaging/aur/PKGBUILD
