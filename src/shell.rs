@@ -296,13 +296,14 @@ impl Shell {
 
     fn banner(&self) {
         println!(
-            "{}❯ opsh{}  {}local shell{}\n  {}help{} · Ctrl+R search · Ctrl+D exit\n",
+            "{}{mark} opsh{}  {}local shell{}\n  {}help{} · Ctrl+R search · Ctrl+D exit\n",
             self.paint(BOLD),
             self.ansi_reset(),
             self.paint(DIM),
             self.ansi_reset(),
             self.ansi_accent(),
-            self.ansi_reset()
+            self.ansi_reset(),
+            mark = option_sdk::App::OPSH.mark()
         );
     }
 
