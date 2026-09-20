@@ -1,14 +1,14 @@
-# ◆ opsh
+# ❯ opsh
 
 **opsh** — a small, local-first shell written in Rust.
 
 It keeps the interface deliberately quiet: a color-aware prompt, local history with ↑/↓ recall and Ctrl+R search, tab completion and a compact set of built-ins. Everything else is passed to your configured system shell, so familiar pipes, redirects, environment variables and scripts keep working.
 
 ```text
-◆ opsh  local shell
+❯ opsh  local shell
   help · Ctrl+R search · Ctrl+D to exit
 
-◆ ~/AEFireflyLabs/opsh main
+❯ ~/AEFireflyLabs/opsh main
 › pwd
 /home/firefly/AEFireflyLabs/opsh
 ```

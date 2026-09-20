@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use option_sdk::App;
+
 use crate::shell::{Shell, is_truthy_env};
 
 pub(crate) const RESET: &str = "\x1b[0m";
@@ -49,9 +51,9 @@ impl Shell {
             } else {
                 self.ansi_err()
             };
-            format!("{color}◆{}", self.ansi_reset())
+            format!("{color}{}{}", App::OPSH.mark(), self.ansi_reset())
         } else {
-            "◆".into()
+            App::OPSH.mark().to_string()
         };
         let prompt = if styled {
             format!("{}›{}", self.ansi_mark(), self.ansi_reset())
@@ -363,7 +365,7 @@ mod tests {
             shell.render_prompt("{cwd}", false),
             compact_path(&cwd).unwrap()
         );
-        assert_eq!(shell.render_prompt("{mark}{prompt}", false), "◆›");
+        assert_eq!(shell.render_prompt("{mark}{prompt}", false), "❯›");
         assert_eq!(shell.render_prompt("[{status}]", false), "[]");
         assert_eq!(shell.render_prompt("[{elapsed}]", false), "[]");
         assert_eq!(shell.render_prompt("[{stack}]", false), "[]");
@@ -384,7 +386,7 @@ mod tests {
 
         assert_eq!(
             shell.render_prompt("{mark}{status}{stack} {prompt} ", false),
-            "◆ ×42 ·2 › "
+            "❯ ×42 ·2 › "
         );
     }
 
@@ -435,7 +437,7 @@ mod tests {
         shell.color = true;
         assert_eq!(
             shell.render_prompt("{mark}", true),
-            format!("{GREEN}◆{RESET}")
+            format!("{GREEN}❯{RESET}")
         );
         assert_eq!(
             shell.render_prompt("{prompt}", true),
@@ -444,7 +446,7 @@ mod tests {
         shell.last_status = 7;
         assert_eq!(
             shell.render_prompt("{mark}{status}", true),
-            format!("{RED}◆{RESET} {RED}×7{RESET}")
+            format!("{RED}❯{RESET} {RED}×7{RESET}")
         );
         let cwd = env::current_dir().unwrap();
         assert_eq!(

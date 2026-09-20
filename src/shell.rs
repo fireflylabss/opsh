@@ -296,7 +296,7 @@ impl Shell {
 
     fn banner(&self) {
         println!(
-            "{}◆ opsh{}  {}local shell{}\n  {}help{} · Ctrl+R search · Ctrl+D exit\n",
+            "{}❯ opsh{}  {}local shell{}\n  {}help{} · Ctrl+R search · Ctrl+D exit\n",
             self.paint(BOLD),
             self.ansi_reset(),
             self.paint(DIM),
