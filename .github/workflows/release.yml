@@ -57,22 +57,17 @@ jobs:
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_message: Update to ${{ needs.resolve.outputs.version }}
 
-      - name: Open PR with packaging bump
-        uses: peter-evans/create-pull-request@v8
-        with:
-          base: main
-          branch: chore/aur-bump-${{ needs.resolve.outputs.version }}
-          add-paths: |
-            packaging/aur/PKGBUILD
-            packaging/aur/.SRCINFO
-          commit-message: "chore(aur): bump to ${{ needs.resolve.outputs.version }}"
-          title: "chore(aur): bump packaging to ${{ needs.resolve.outputs.version }}"
-          body: |
-            Automated by the `release` workflow for tag `${{ needs.resolve.outputs.tag }}`.
-            The AUR package has already been published; this PR syncs
-            `packaging/aur/PKGBUILD` and `.SRCINFO` on `main`.
-            No-op (no PR) if `main` already carries this bump.
-          delete-branch: true
+      - name: Commit packaging bump on main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
+          if git diff --cached --quiet; then
+            echo "packaging already up to date"
+          else
+            git commit -m "chore(aur): bump to ${{ needs.resolve.outputs.version }}"
+            git push origin HEAD:main
+          fi
 
   crates-io:
     needs: resolve
